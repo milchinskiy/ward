@@ -43,7 +43,12 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     let mut lua_content = fs::read_to_string(path).await?;
     // drop shebang if present
     if lua_content.starts_with("#!") {
-        lua_content = lua_content.lines().skip(1).collect::<Vec<_>>().join("\n");
+        if let Some(pos) = lua_content.find('\n') {
+            lua_content.replace_range(..=pos, "\n");
+        } else {
+            // clear entire file if shebang is the only line
+            lua_content.clear();
+        }
     }
 
     let name = path.to_string_lossy().to_string();
@@ -66,7 +71,10 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         .exec_async();
 
     if let Some(timeout) = policy.timeout {
-        tokio::time::timeout(timeout, evaluator).await??;
+        match tokio::time::timeout(timeout, evaluator).await {
+            Ok(res) => res.map_err(crate::Error::from),
+            Err(e) => Err(e.into()),
+        }?;
     } else {
         evaluator.await?;
     }
