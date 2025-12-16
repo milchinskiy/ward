@@ -1,7 +1,7 @@
 #![allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
 
 use mlua::{Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods, Value};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 /// Module init
 /// # Errors [`mlua::Error`]
@@ -100,6 +100,18 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     term.set("ansi", lua.create_function(|_, spec: String| Ok(ansi_code(&spec)))?)?;
+
+    term.set(
+        "isatty",
+        lua.create_function(|_, which: Option<String>| {
+            let which = which.unwrap_or_else(|| "stdout".to_string());
+            Ok(match which.to_ascii_lowercase().as_str() {
+                "stdin" => io::stdin().is_terminal(),
+                "stderr" => io::stderr().is_terminal(),
+                _ => io::stdout().is_terminal(),
+            })
+        })?,
+    )?;
 
     Ok(term)
 }
