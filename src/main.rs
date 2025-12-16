@@ -1,3 +1,6 @@
+mod cli;
+
 fn main() {
-    println!("Hello, world!");
+    cli::init_logger();
+    cli::commands::handle();
 }

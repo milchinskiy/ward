@@ -7,9 +7,14 @@ pub mod ini;
 /// # Errors [`mlua::Error`]
 pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
-    table.set("json", json::define(lua)?)?;
-    table.set("toml", toml::define(lua)?)?;
-    table.set("yaml", yaml::define(lua)?)?;
-    table.set("ini", ini::define(lua)?)?;
+    for (name, module) in [
+        ("json", json::define(lua)?),
+        ("toml", toml::define(lua)?),
+        ("yaml", yaml::define(lua)?),
+        ("ini", ini::define(lua)?),
+    ] {
+        table.set(name, &module)?;
+        lua.register_module(format!("ward.convert.{name}").as_str(), module)?;
+    }
     Ok(table)
 }

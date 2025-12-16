@@ -62,7 +62,7 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     lua.set_app_data(policy.clone());
     populate_modules(lua, policy)?;
 
-    let env = lua.create_table()?;
+    let env = lua.globals();
     populate_env(lua, &env, policy)?;
 
     let evaluator = lua
@@ -111,7 +111,7 @@ fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
 
     for (name, module) in existing_modules {
         lua.register_module(format!("ward.{name}").as_str(), &module)?;
-        exposed_modules.set((*name).to_string(), module)?;
+        exposed_modules.set(name, module)?;
     }
     lua.register_module("ward", exposed_modules)?;
 
