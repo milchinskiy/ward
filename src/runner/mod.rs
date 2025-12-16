@@ -11,7 +11,7 @@ use sandbox::SandboxPolicy;
 /// Runs a lua file
 /// # Errors [`crate::Error`]
 pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
-    let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
+    let libs = StdLib::PACKAGE | StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
     let lua_options = LuaOptions::new().thread_pool_size(policy.thread_pool_size);
     let lua = Lua::new_with(libs, lua_options).map_err(crate::Error::from)?;
 
@@ -56,8 +56,8 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
 }
 
 async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) -> crate::Result {
-    use crate::runner::sandbox::SandboxPolicyPermissions;
-    lua.set_app_data(SandboxPolicyPermissions::from(policy));
+    use crate::runner::sandbox::SandboxPolicy;
+    lua.set_app_data(SandboxPolicy::default());
     populate_modules(lua, policy)?;
 
     let env = lua.create_table()?;
@@ -82,43 +82,17 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     Ok(())
 }
 
+#[allow(unused_variables, clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
 fn populate_env(lua: &Lua, env: &mlua::Table, policy: &SandboxPolicy) -> mlua::Result<()> {
-    let globals = lua.globals();
-    let safe = lua.create_table()?;
-
-    for (name, allowed) in &policy.globals {
-        let value = if *allowed {
-            globals.get::<mlua::Value>(name.as_str())?
-        } else {
-            mlua::Value::Nil
-        };
-        safe.set(name.as_str(), value)?;
-    }
-
-    let mt = lua.create_table()?;
-    mt.set("__index", safe)?;
-    env.set_metatable(Some(mt))?;
-
-    if policy.allow_require {
-        // TODO: implement require
-    } else {
-        env.set("require", mlua::Value::Nil)?;
-    }
-
-    // Avoid giving access to raw globals table
-    env.set("_G", env.clone())?;
-
     Ok(())
 }
 
+#[allow(unused_variables)]
 fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
     let exposed_modules = lua.create_table()?;
-    let allowed_modules = crate::lua::modules(lua)?
-        .into_iter()
-        .filter(|(name, _)| policy.ward_modules.contains_key(name) && policy.ward_modules[name])
-        .collect::<Vec<_>>();
+    let existing_modules = crate::lua::modules(lua)?;
 
-    for (name, module) in allowed_modules {
+    for (name, module) in existing_modules {
         lua.register_module(format!("ward.{name}").as_str(), &module)?;
         exposed_modules.set((*name).to_string(), module)?;
     }

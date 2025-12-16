@@ -6,7 +6,6 @@ use std::path::Path;
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
     let env_table = lua.create_table()?;
 
-
     env_table.set(
         "get",
         lua.create_function(|_, (key, default): (String, Option<String>)| {
@@ -20,8 +19,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     env_table.set(
         "set",
-        lua.create_function(|lua, (key, value): (String, String)| {
-            super::require(lua, |p| p.allow_env_mutation, "environment mutation is disabled")?;
+        lua.create_function(|_, (key, value): (String, String)| {
             if !is_valid_key(&key) || value.contains('\0') {
                 return Ok(false);
             }
@@ -35,8 +33,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     env_table.set(
         "unset",
-        lua.create_function(|lua, key: String| {
-            super::require(lua, |p| p.allow_env_mutation, "environment mutation is disabled")?;
+        lua.create_function(|_, key: String| {
             if !is_valid_key(&key) {
                 return Ok(false);
             }

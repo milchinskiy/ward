@@ -188,8 +188,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "mkdir",
-        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "mkdir is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = MkdirOpts::from_value(opts)?;
             mkdir_async(path.as_path(), opts).await
@@ -198,8 +197,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "rm",
-        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "rm is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RemoveOpts::from_value(opts)?;
             rm_async(path.as_path(), opts).await
@@ -208,8 +206,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "unlink",
-        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "unlink is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = ForceOnly::from_value(opts)?;
             unlink_async(path.as_path(), opts).await
@@ -218,8 +215,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "chmod",
-        lua.create_async_function(|lua, (path, mode, opts): (Value, u32, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "chmod is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, mode, opts): (Value, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
             chmod_async(path.as_path(), mode, opts).await
@@ -228,8 +224,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "chown",
-        lua.create_async_function(|lua, (path, uid, gid, opts): (Value, u32, u32, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "chown is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, uid, gid, opts): (Value, u32, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
             chown_async(path.as_path(), uid, gid, opts).await
@@ -238,8 +233,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "rename",
-        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "rename is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
@@ -249,8 +243,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "link",
-        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "link is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
@@ -260,8 +253,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "symlink",
-        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "symlink is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
@@ -271,8 +263,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "touch",
-        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "touch is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = TouchOpts::from_value(opts)?;
             touch_async(path.as_path(), opts).await
@@ -291,8 +282,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "write",
-        lua.create_async_function(|lua, (path, data, opts): (Value, mlua::Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "write is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (path, data, opts): (Value, mlua::Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = WriteOpts::from_value(opts)?;
 
@@ -309,8 +299,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "copy",
-        lua.create_async_function(|lua, (from, to, opts): (Value, Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "copy is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (from, to, opts): (Value, Value, Value)| async move {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
@@ -320,8 +309,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "move",
-        lua.create_async_function(|lua, (from, to, opts): (Value, Value, Value)| async move {
-            super::require(&lua, |p| p.allow_fs_write, "move is not allowed in this sandbox")?;
+        lua.create_async_function(|_, (from, to, opts): (Value, Value, Value)| async move {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
@@ -331,10 +319,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "tempdir",
-        lua.create_async_function(|lua, prefix: Option<String>| async move {
-            super::require(&lua, |p| p.allow_fs_write, "tempdir is not allowed in this sandbox")?;
-            tempdir_async(prefix).await
-        })?,
+        lua.create_async_function(|_, prefix: Option<String>| async move { tempdir_async(prefix).await })?,
     )?;
 
     Ok(fs_table)
