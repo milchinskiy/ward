@@ -6,6 +6,8 @@ pub mod net;
 pub mod io;
 pub mod process;
 pub mod log;
+pub mod host;
+pub mod lifecycle;
 
 #[allow(unused)]
 fn require(
@@ -25,10 +27,11 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("convert".to_string(), convert::define(lua)?),
         ("env".to_string(), env::define(lua)?),
         ("fs".to_string(), fs::define(lua)?),
-        ("io".to_string(), io::define(lua)?),
         ("helpers".to_string(), helpers::define(lua)?),
+        ("io".to_string(), io::define(lua)?),
+        ("lifecycle".to_string(), lifecycle::define(lua)?),
+        ("log".to_string(), log::define(lua)?),
         ("net".to_string(), net::define(lua)?),
         ("process".to_string(), process::define(lua)?),
-        ("log".to_string(), log::define(lua)?),
     ])
 }

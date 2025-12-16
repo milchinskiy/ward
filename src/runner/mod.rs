@@ -26,7 +26,7 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
                 every_nth_instruction: Some(10_000),
                 ..HookTriggers::default()
             },
-            move |_lua, _debug| {
+            move |lua, _debug| {
                 let step = 10_000u64;
                 let left = remaining
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(step))
@@ -35,6 +35,9 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
                 if left == 0 {
                     return Err(mlua::Error::external("script instruction limit exceeded"));
                 }
+                // Drain pending signals and interrupt execution if shutdown requested.
+                // This must be fast and non-blocking.
+                crate::lua::lifecycle::tick(lua)?;
                 Ok(VmState::Continue)
             },
         )?;
@@ -56,8 +59,7 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
 }
 
 async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) -> crate::Result {
-    use crate::runner::sandbox::SandboxPolicy;
-    lua.set_app_data(SandboxPolicy::default());
+    lua.set_app_data(policy.clone());
     populate_modules(lua, policy)?;
 
     let env = lua.create_table()?;
@@ -70,16 +72,31 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         .set_environment(env)
         .exec_async();
 
-    if let Some(timeout) = policy.timeout {
+    // Run the chunk, but always run shutdown callbacks before returning.
+    let exec_res: crate::Result = if let Some(timeout) = policy.timeout {
         match tokio::time::timeout(timeout, evaluator).await {
             Ok(res) => res.map_err(crate::Error::from),
             Err(e) => Err(e.into()),
-        }?;
+        }
     } else {
-        evaluator.await?;
-    }
+        evaluator.await.map_err(crate::Error::from)
+    };
 
-    Ok(())
+    // Decide a reason for shutdown callbacks.
+    let reason = if crate::lua::lifecycle::shutdown_requested(lua) {
+        crate::lua::lifecycle::ShutdownReason::Signal
+    } else if exec_res.is_err() {
+        crate::lua::lifecycle::ShutdownReason::Error
+    } else {
+        crate::lua::lifecycle::ShutdownReason::Success
+    };
+
+    let shut_res = crate::lua::lifecycle::run_shutdown(lua, reason, None);
+    match (exec_res, shut_res) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(e)) => Err(e.into()),
+        (Err(e), _) => Err(e),
+    }
 }
 
 #[allow(unused_variables, clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
