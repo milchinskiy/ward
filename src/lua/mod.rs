@@ -9,6 +9,7 @@ pub mod log;
 pub mod host;
 pub mod lifecycle;
 pub mod time;
+pub mod term;
 
 #[allow(unused)]
 fn require(
@@ -34,6 +35,7 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("log".to_string(), log::define(lua)?),
         ("net".to_string(), net::define(lua)?),
         ("process".to_string(), process::define(lua)?),
+        ("term".to_string(), term::define(lua)?),
         ("time".to_string(), time::define(lua)?),
     ])
 }
