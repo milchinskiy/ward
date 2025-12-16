@@ -5,6 +5,7 @@ pub mod helpers;
 pub mod net;
 pub mod io;
 pub mod process;
+pub mod log;
 
 #[allow(unused)]
 fn require(
@@ -28,5 +29,6 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("helpers".to_string(), helpers::define(lua)?),
         ("net".to_string(), net::define(lua)?),
         ("process".to_string(), process::define(lua)?),
+        ("log".to_string(), log::define(lua)?),
     ])
 }
