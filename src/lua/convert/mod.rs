@@ -13,7 +13,7 @@ pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
         ("yaml", yaml::define(lua)?),
         ("ini", ini::define(lua)?),
     ] {
-        table.set(name, &module)?;
+        table.set(name, module.clone())?;
         lua.register_module(format!("ward.convert.{name}").as_str(), module)?;
     }
     Ok(table)

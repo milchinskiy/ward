@@ -9,7 +9,7 @@ pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
         ("http", http::define(lua)?),
         ("fetch", fetch::define(lua)?),
     ] {
-        net.set(name, &module)?;
+        net.set(name, module.clone())?;
         lua.register_module(format!("ward.net.{name}").as_str(), module)?;
     }
     Ok(net)

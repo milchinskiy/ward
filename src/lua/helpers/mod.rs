@@ -11,7 +11,7 @@ pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
         ("string", string::define(lua)?),
         ("table", table::define(lua)?),
     ] {
-        table.set(name, &module)?;
+        table.set(name, module.clone())?;
         lua.register_module(format!("ward.helpers.{name}").as_str(), module)?;
     }
     Ok(table)

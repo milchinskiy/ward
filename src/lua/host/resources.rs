@@ -9,7 +9,6 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     m.set(
         "get",
         lua.create_function(|lua, ()| {
-            // sysinfo values are KiB for memory; convert to bytes.
             let mut sys = System::new_with_specifics(
                 RefreshKind::nothing()
                     .with_memory(MemoryRefreshKind::nothing().with_ram())

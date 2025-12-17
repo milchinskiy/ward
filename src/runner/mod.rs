@@ -18,23 +18,26 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     lua.set_memory_limit(policy.memory_limit_bytes)
         .map_err(crate::Error::from)?;
 
+    let hook_step: u64 = policy.instruction_limit.clamp(1, 10_000);
     let remaining = Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit));
     {
         let remaining = remaining.clone();
         lua.set_hook(
             HookTriggers {
-                every_nth_instruction: Some(10_000),
+                #[allow(clippy::cast_possible_truncation)]
+                every_nth_instruction: Some(hook_step as u32),
                 ..HookTriggers::default()
             },
             move |lua, _debug| {
-                let step = 10_000u64;
-                let left = remaining
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(step))
+                let left_after = remaining
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(hook_step))
+                    .map(|prev| prev - hook_step)
                     .unwrap_or(0);
 
-                if left == 0 {
+                if left_after == 0 {
                     return Err(mlua::Error::external("script instruction limit exceeded"));
                 }
+
                 // Drain pending signals and interrupt execution if shutdown requested.
                 // This must be fast and non-blocking.
                 crate::lua::lifecycle::tick(lua)?;
@@ -85,6 +88,8 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     // Decide a reason for shutdown callbacks.
     let reason = if crate::lua::lifecycle::shutdown_requested(lua) {
         crate::lua::lifecycle::ShutdownReason::Signal
+    } else if matches!(exec_res, Err(crate::Error::Timeout(_))) {
+        crate::lua::lifecycle::ShutdownReason::Timeout
     } else if exec_res.is_err() {
         crate::lua::lifecycle::ShutdownReason::Error
     } else {
@@ -110,7 +115,7 @@ fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
     let existing_modules = crate::lua::modules(lua)?;
 
     for (name, module) in existing_modules {
-        lua.register_module(format!("ward.{name}").as_str(), &module)?;
+        lua.register_module(format!("ward.{name}").as_str(), module.clone())?;
         exposed_modules.set(name, module)?;
     }
     lua.register_module("ward", exposed_modules)?;

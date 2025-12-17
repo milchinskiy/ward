@@ -40,7 +40,7 @@ fn is_float_fn(_: &Lua, n: f64) -> mlua::Result<bool> {
 }
 
 fn is_number_fn(_: &Lua, v: Value) -> mlua::Result<bool> {
-    Ok(matches!(v, Value::Number(_)))
+    Ok(matches!(v, Value::Number(_) | Value::Integer(_)))
 }
 
 fn is_nan_fn(_: &Lua, v: Value) -> mlua::Result<bool> {
@@ -52,7 +52,11 @@ fn is_infinity_fn(_: &Lua, v: Value) -> mlua::Result<bool> {
 }
 
 fn is_finite_fn(_: &Lua, v: Value) -> mlua::Result<bool> {
-    Ok(matches!(v, Value::Number(n) if n.is_finite()))
+    Ok(match v {
+        Value::Integer(_) => true,
+        Value::Number(n) => n.is_finite(),
+        _ => false,
+    })
 }
 
 fn round_fn(_: &Lua, (n, precision): (f64, i32)) -> mlua::Result<f64> {

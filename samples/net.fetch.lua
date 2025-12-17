@@ -1,5 +1,5 @@
 local fetch = require("ward.net.fetch")
-local r = fetch.url("https://httpbin.org/get", {
+local r = fetch.url("https://wttr.in/Tokyo?format=j2", {
     method = "GET",
     headers = {
         ["User-Agent"] = "Ward",
@@ -10,7 +10,7 @@ local r = fetch.url("https://httpbin.org/get", {
     max_bytes = 1024 * 1024 * 2, -- 2MB
 })
 
-print(r.status, r:status())
-print(r.is_ok, r:ok())
-print(r.path, r:path())
-print(r.size, r:size())
+print(r.status)
+print(r.ok)
+print(r.path)
+print(r.size)

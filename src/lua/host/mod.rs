@@ -9,7 +9,7 @@ pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
         ("platform", platform::define(lua)?),
         ("resources", resources::define(lua)?),
     ] {
-        host.set(name, &module)?;
+        host.set(name, module.clone())?;
         lua.register_module(format!("ward.host.{name}").as_str(), module)?;
     }
     Ok(host)

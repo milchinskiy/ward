@@ -202,9 +202,15 @@ fn sequence_from_strings(lua: &Lua, values: impl IntoIterator<Item = String>) ->
     Ok(table)
 }
 
+#[allow(clippy::cast_possible_wrap)]
 fn capture_to_table<'a>(lua: &'a Lua, captures: impl Iterator<Item = Option<regex::Match<'a>>>) -> mlua::Result<Table> {
-    let collected: Vec<String> = captures.filter_map(|m| m.map(|v| v.as_str().to_string())).collect();
-    sequence_from_strings(lua, collected)
+    let table = lua.create_table()?;
+    for (idx, m) in captures.enumerate() {
+        if let Some(v) = m {
+            table.set((idx + 1) as i64, v.as_str().to_string())?;
+        }
+    }
+    Ok(table)
 }
 
 fn word_regex() -> &'static Regex {

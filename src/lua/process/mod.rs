@@ -375,6 +375,7 @@ async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResul
     // Capture last stdout/stderr if required.
     let mut last_stdout_task = None;
     let mut last_stderr_task = None;
+    let mut last_stderr_to_stdout_task = None;
 
     if matches!(mode, RunMode::Capture) {
         if let Some(out) = stdouts[n - 1].take() {
@@ -394,11 +395,24 @@ async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResul
             }));
         }
     } else if specs[n - 1].stderr_to_stdout {
-        // In inherit mode with stderr_to_stdout on the last command:
-        // we can’t perfectly “redirect to stdout” without OS-level duplication; keep it simple:
-        // we still pipe stderr but we won’t display it unless the user uses :output().
-        // (This is an acceptable MVP tradeoff.)
-        let _ = stderrs[n - 1].take();
+        // In inherit mode, leaving stderr piped without reading it can deadlock the child.
+        // Best-effort: drain the last stderr and forward it to the parent stdout.
+        if let Some(err) = stderrs[n - 1].take() {
+            last_stderr_to_stdout_task = Some(tokio::spawn(async move {
+                let mut r = err;
+                let mut out = tokio::io::stdout();
+                let mut buf = [0u8; 16 * 1024];
+                loop {
+                    match r.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let _ = out.write_all(&buf[..n]).await;
+                            let _ = out.flush().await;
+                        }
+                    }
+                }
+            }));
+        }
     }
 
     // Wait with optional timeout (use last command’s timeout if set)
@@ -423,10 +437,35 @@ async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResul
         if let Ok(v) = time::timeout(Duration::from_millis(ms), wait_fut).await {
             v?
         } else {
-            // timeout: kill all
+            // timeout: kill all and reap children to avoid zombies.
             for ch in &mut children {
                 let _ = ch.kill().await;
             }
+            for ch in &mut children {
+                let _ = ch.wait().await;
+            }
+
+            // Ensure background pipe/capture tasks don't outlive this call.
+            for t in &link_tasks {
+                t.abort();
+            }
+            for t in link_tasks {
+                let _ = t.await;
+            }
+
+            if let Some(t) = last_stdout_task.take() {
+                t.abort();
+                let _ = t.await;
+            }
+            if let Some(t) = last_stderr_task.take() {
+                t.abort();
+                let _ = t.await;
+            }
+            if let Some(t) = last_stderr_to_stdout_task.take() {
+                t.abort();
+                let _ = t.await;
+            }
+
             return Ok(ProcResult {
                 ok: false,
                 code: 124,
@@ -442,6 +481,10 @@ async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResul
 
     // Make sure pipe tasks stop
     for t in link_tasks {
+        let _ = t.await;
+    }
+
+    if let Some(t) = last_stderr_to_stdout_task {
         let _ = t.await;
     }
 

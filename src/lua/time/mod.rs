@@ -3,12 +3,11 @@
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 use chrono::{
-    DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, SecondsFormat,
-    TimeZone, Utc,
+    DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc,
 };
 use mlua::{
-    AnyUserData, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, UserDataMethods,
-    Value, ObjectLike,
+    AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, RegistryKey, Table, UserData, UserDataMethods,
+    Value,
 };
 
 use chrono::{Datelike, Timelike};
@@ -58,11 +57,7 @@ impl TimePoint {
             self.0.format("%H:%M:%S").to_string()
         } else {
             // Always fixed 9 digits for stable parsing downstream.
-            format!(
-                "{}.{:09}",
-                self.0.format("%H:%M:%S"),
-                self.0.nanosecond()
-            )
+            format!("{}.{:09}", self.0.format("%H:%M:%S"), self.0.nanosecond())
         }
     }
 
@@ -309,17 +304,14 @@ impl UserData for InstantPoint {
             lua.create_userdata(Duration::new(std_to_chrono(d)?))
         });
 
-        methods.add_meta_method(MetaMethod::ToString, |_, _, ()| {
-            Ok("InstantPoint(monotonic)".to_string())
-        });
+        methods.add_meta_method(MetaMethod::ToString, |_, _, ()| Ok("InstantPoint(monotonic)".to_string()));
 
         // instant - instant -> duration
         methods.add_meta_method(MetaMethod::Sub, |lua, a, b: AnyUserData| {
             let b = b.borrow::<Self>()?.clone();
-            let d = a
-                .0
-                .checked_duration_since(b.0)
-                .ok_or_else(|| mlua::Error::external("instant is earlier than other"))?;
+            let d =
+                a.0.checked_duration_since(b.0)
+                    .ok_or_else(|| mlua::Error::external("instant is earlier than other"))?;
             Ok(Value::UserData(lua.create_userdata(Duration::new(std_to_chrono(d)?))?))
         });
     }
@@ -341,9 +333,7 @@ impl UserData for SleepAwaitable {
             Ok(true)
         });
 
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("Sleep({:?})", this.duration))
-        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(format!("Sleep({:?})", this.duration)));
     }
 }
 
@@ -365,9 +355,7 @@ impl UserData for AfterAwaitable {
             call_optional_callback(&lua, &mut this).await
         });
 
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("After({:?})", this.duration))
-        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(format!("After({:?})", this.duration)));
     }
 }
 
@@ -393,16 +381,12 @@ struct TimeoutAwaitable {
 
 impl UserData for TimeoutAwaitable {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_async_method_mut("wait", |lua, mut this, ()| async move {
-            timeout_wait(&lua, &mut this).await
-        });
+        methods.add_async_method_mut("wait", |lua, mut this, ()| async move { timeout_wait(&lua, &mut this).await });
         methods.add_async_meta_method_mut(MetaMethod::Call, |lua, mut this, ()| async move {
             timeout_wait(&lua, &mut this).await
         });
 
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("Timeout({:?})", this.duration))
-        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(format!("Timeout({:?})", this.duration)));
     }
 }
 
@@ -415,9 +399,16 @@ async fn timeout_wait(lua: &Lua, this: &mut TimeoutAwaitable) -> mlua::Result<Mu
     let ud: AnyUserData = lua.registry_value(&key)?;
 
     let fut = async {
-        // We rely on the contract: awaitable userdata provides wait() or __call().
-        // We call wait() here for composability.
-        ud.call_async_method::<MultiValue>("wait", ()).await
+        // Prefer `wait()` for composability (e.g. time.timeout(time.sleep(...))).
+        if let Ok(wait_fn) = ud.get::<Function>("wait") {
+            return wait_fn.call_async::<MultiValue>((ud.clone(),)).await;
+        }
+
+        if let Ok(call_fn) = ud.get::<Function>("__call") {
+            return call_fn.call_async::<MultiValue>((ud.clone(),)).await;
+        }
+
+        Err(mlua::Error::external("awaitable has neither wait() nor __call()"))
     };
 
     let res = tokio::time::timeout(this.duration, fut).await;
@@ -461,9 +452,7 @@ impl UserData for IntervalTimer {
             Ok(this.tick)
         });
 
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("Interval({:?})", this.period))
-        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(format!("Interval({:?})", this.period)));
     }
 }
 
@@ -489,14 +478,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    time.set(
-        "parse_rfc3339",
-        lua.create_function(|_, value: String| parse_rfc3339(&value))?,
-    )?;
-    time.set(
-        "parse_rfc2822",
-        lua.create_function(|_, value: String| parse_rfc2822(&value))?,
-    )?;
+    time.set("parse_rfc3339", lua.create_function(|_, value: String| parse_rfc3339(&value))?)?;
+    time.set("parse_rfc2822", lua.create_function(|_, value: String| parse_rfc2822(&value))?)?;
     time.set(
         "parse",
         lua.create_function(|_, (fmt, value): (String, String)| parse_with_format(&fmt, &value))?,
@@ -527,10 +510,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     time.set("duration", lua.create_function(|_, v: Value| parse_duration(v))?)?;
 
     // Monotonic time
-    time.set(
-        "instant_now",
-        lua.create_function(|_, ()| Ok(InstantPoint(StdInstant::now())))?,
-    )?;
+    time.set("instant_now", lua.create_function(|_, ()| Ok(InstantPoint(StdInstant::now())))?)?;
 
     // Awaitable timers
     time.set(
@@ -553,10 +533,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 None => None,
             };
 
-            lua.create_userdata(AfterAwaitable {
-                duration: std,
-                cb_key,
-            })
+            lua.create_userdata(AfterAwaitable { duration: std, cb_key })
         })?,
     )?;
 
@@ -632,8 +609,7 @@ fn parse_with_format(fmt: &str, value: &str) -> mlua::Result<TimePoint> {
     }
 
     if let Ok(naive_dt) = NaiveDateTime::parse_from_str(value, fmt) {
-        let dt = Utc
-            .from_utc_datetime(&naive_dt);
+        let dt = Utc.from_utc_datetime(&naive_dt);
         return Ok(TimePoint::new(dt));
     }
 
@@ -667,8 +643,7 @@ fn from_timestamp(seconds: f64) -> mlua::Result<TimePoint> {
         nanos -= 1_000_000_000;
     }
 
-    let nanos_u32 = u32::try_from(nanos)
-        .map_err(|_| mlua::Error::external("timestamp nanoseconds out of range"))?;
+    let nanos_u32 = u32::try_from(nanos).map_err(|_| mlua::Error::external("timestamp nanoseconds out of range"))?;
 
     let datetime = Utc
         .timestamp_opt(secs, nanos_u32)
@@ -694,21 +669,24 @@ fn parse_duration(value: Value) -> mlua::Result<Duration> {
             let millis = t.get::<Option<f64>>("millis")?.unwrap_or(0.0);
             let micros = t.get::<Option<f64>>("micros")?.unwrap_or(0.0);
 
-            let total_seconds =
-                seconds + (minutes * 60.0) + (hours * 3_600.0) + (days * 86_400.0)
-                    + (millis / 1_000.0)
-                    + (micros / 1_000_000.0);
+            let total_seconds = seconds
+                + (minutes * 60.0)
+                + (hours * 3_600.0)
+                + (days * 86_400.0)
+                + (millis / 1_000.0)
+                + (micros / 1_000_000.0);
 
             duration_from_seconds(total_seconds).map(Duration::new)
         }
-        Value::UserData(ud) => {
-            ud.borrow::<Duration>().map_or_else(|_| Err(mlua::Error::external(
+        Value::UserData(ud) => ud.borrow::<Duration>().map_or_else(
+            |_| {
+                Err(mlua::Error::external(
                     "userdata is not a Duration (expected number, table, or Duration)",
-                )), |d| Ok(d.clone()))
-        }
-        _ => Err(mlua::Error::external(
-            "duration must be number, table, or Duration userdata",
-        )),
+                ))
+            },
+            |d| Ok(d.clone()),
+        ),
+        _ => Err(mlua::Error::external("duration must be number, table, or Duration userdata")),
     }
 }
 
@@ -733,17 +711,13 @@ fn chrono_to_std_nonneg(d: ChronoDuration) -> mlua::Result<StdDuration> {
     if micros < 0 {
         return Err(mlua::Error::external("duration must be non-negative"));
     }
-    let umicros = u64::try_from(micros)
-        .map_err(|_| mlua::Error::external("duration overflow"))?;
+    let umicros = u64::try_from(micros).map_err(|_| mlua::Error::external("duration overflow"))?;
     Ok(StdDuration::from_micros(umicros))
 }
 
 fn std_to_chrono(d: StdDuration) -> mlua::Result<ChronoDuration> {
     // Convert with microsecond precision.
-    let micros = d
-        .as_micros();
-    let micros_i64 = i64::try_from(micros)
-        .map_err(|_| mlua::Error::external("duration overflow"))?;
+    let micros = d.as_micros();
+    let micros_i64 = i64::try_from(micros).map_err(|_| mlua::Error::external("duration overflow"))?;
     Ok(ChronoDuration::microseconds(micros_i64))
 }
-

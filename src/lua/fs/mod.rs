@@ -387,14 +387,18 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
     let target = path.to_path_buf();
 
     if exists_async(&target).await {
-        let is_dir = tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false);
-        if is_dir || options.force {
-            return Ok(true);
-        }
-        if options.force {
-            let _ = tokio::fs::remove_file(&target).await;
-        } else {
-            return Ok(false);
+        let meta = tokio::fs::symlink_metadata(&target).await;
+        if let Ok(meta) = meta {
+            if meta.is_dir() {
+                return Ok(true);
+            }
+
+            if options.force {
+                // Works for files and symlinks.
+                let _ = tokio::fs::remove_file(&target).await;
+            } else {
+                return Ok(false);
+            }
         }
     }
 
@@ -404,8 +408,8 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
         tokio::fs::create_dir(&target).await
     };
 
-    if res.is_err() && !options.force {
-        return Ok(false);
+    if res.is_err() {
+        return Ok(options.force && exists_async(&target).await);
     }
 
     #[cfg(unix)]
@@ -428,9 +432,14 @@ async fn rm_async(path: &Path, options: RemoveOpts) -> mlua::Result<bool> {
         return Ok(options.force);
     }
 
-    let is_dir = tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false);
+    let Ok(meta) = tokio::fs::symlink_metadata(&target).await else {
+        return Ok(options.force);
+    };
+    let ft = meta.file_type();
+    let is_dir = ft.is_dir();
+    let is_symlink = ft.is_symlink();
 
-    let res = if is_dir {
+    let res = if is_dir && !is_symlink {
         if options.recursive {
             tokio::fs::remove_dir_all(&target).await
         } else {
