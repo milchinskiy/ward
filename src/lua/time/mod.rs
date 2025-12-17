@@ -404,11 +404,12 @@ async fn timeout_wait(lua: &Lua, this: &mut TimeoutAwaitable) -> mlua::Result<Mu
             return wait_fn.call_async::<MultiValue>((ud.clone(),)).await;
         }
 
-        if let Ok(call_fn) = ud.get::<Function>("__call") {
-            return call_fn.call_async::<MultiValue>((ud.clone(),)).await;
-        }
-
-        Err(mlua::Error::external("awaitable has neither wait() nor __call()"))
+        // Fallback to calling the userdata itself (requires `MetaMethod::Call`).
+        // AnyUserData does not expose direct metatable access; ObjectLike::call_async
+        // is the reliable way to trigger `__call`.
+        ud.call_async::<MultiValue>(())
+            .await
+            .map_err(|_| mlua::Error::external("awaitable has neither wait() nor __call()"))
     };
 
     let res = tokio::time::timeout(this.duration, fut).await;

@@ -99,7 +99,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    term.set("ansi", lua.create_function(|_, spec: String| Ok(ansi_code(&spec)))?)?;
+    // ANSI escape codes as constants (shell-like ergonomics): term.ansi.red .. "text" .. term.ansi.reset
+    term.set("ansi", ansi_table(lua)?)?;
 
     term.set(
         "isatty",
@@ -110,6 +111,18 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 "stderr" => io::stderr().is_terminal(),
                 _ => io::stdout().is_terminal(),
             })
+        })?,
+    )?;
+
+    // Progress indicator for interactive scripts.
+    // Usage:
+    //   local p = term.progress({ total = 100, message = "Downloading", stream = "stderr" })
+    //   p:tick() ... p:finish()
+    term.set(
+        "progress",
+        lua.create_function(|lua, mv: MultiValue| {
+            let args = parse_progress_args(mv)?;
+            lua.create_userdata(Progress::new(args))
         })?,
     )?;
 
@@ -396,7 +409,6 @@ impl UserData for InputAwaitable {
 
 #[derive(Debug)]
 enum InputResult {
-    Str(String),
     Bool(bool),
     OptStr(Option<String>),
 }
@@ -411,20 +423,15 @@ async fn input_wait(lua: &Lua, this: &mut InputAwaitable) -> mlua::Result<MultiV
     let kind = this.kind.clone();
 
     let res: mlua::Result<InputResult> = tokio::task::spawn_blocking(move || match kind {
-        InputKind::Prompt(args) => prompt_blocking(&args).map(InputResult::Str),
+        InputKind::Prompt(args) => prompt_blocking(&args).map(InputResult::OptStr),
         InputKind::Confirm(args) => confirm_blocking(&args).map(InputResult::Bool),
-        InputKind::Password(args) => password_blocking(&args).map(InputResult::Str),
+        InputKind::Password(args) => password_blocking(&args).map(InputResult::OptStr),
         InputKind::Choose(args) => choose_blocking(&args).map(InputResult::OptStr),
     })
     .await
     .map_err(|e| mlua::Error::external(format!("input task join error: {e}")))?;
 
     match res? {
-        InputResult::Str(s) => {
-            let mut mv = MultiValue::new();
-            mv.push_back(Value::String(lua.create_string(&s)?));
-            Ok(mv)
-        }
         InputResult::Bool(b) => {
             let mut mv = MultiValue::new();
             mv.push_back(Value::Boolean(b));
@@ -443,7 +450,7 @@ async fn input_wait(lua: &Lua, this: &mut InputAwaitable) -> mlua::Result<MultiV
 
 // --- Blocking IO primitives ---------------------------------------------------
 
-fn prompt_blocking(args: &PromptArgs) -> mlua::Result<String> {
+fn prompt_blocking(args: &PromptArgs) -> mlua::Result<Option<String>> {
     let q = args.question.as_str();
 
     if let Some(def) = &args.default {
@@ -458,20 +465,20 @@ fn prompt_blocking(args: &PromptArgs) -> mlua::Result<String> {
 
     if n == 0 {
         // EOF
-        return Ok(String::new());
+        return Ok(None);
     }
 
     if args.trim {
         let s = buf.trim_end_matches(['\r', '\n']).to_string();
         if s.is_empty() {
-            Ok(args.default.clone().unwrap_or_default())
+            Ok(Some(args.default.clone().unwrap_or_default()))
         } else {
-            Ok(s)
+            Ok(Some(s))
         }
     } else if buf.is_empty() {
-        Ok(args.default.clone().unwrap_or_default())
+        Ok(Some(args.default.clone().unwrap_or_default()))
     } else {
-        Ok(buf)
+        Ok(Some(buf))
     }
 }
 
@@ -541,13 +548,27 @@ fn choose_blocking(args: &ChooseArgs) -> mlua::Result<Option<String>> {
     }
 }
 
-fn password_blocking(args: &PasswordArgs) -> mlua::Result<String> {
-    // Reads from the controlling tty with echo disabled
-    let s = rpassword::read_password().map_err(mlua::Error::external)?;
+fn password_blocking(args: &PasswordArgs) -> mlua::Result<Option<String>> {
+    // Print prompt and read from the controlling tty with echo disabled.
+    // (rpassword will fall back to stdin where appropriate.)
+    print!("{} ", args.prompt);
+    io::stdout().flush().ok();
+
+    let s = match rpassword::read_password() {
+        Ok(s) => s,
+        Err(e) => {
+            // Treat EOF as nil for scripting ergonomics.
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                return Ok(None);
+            }
+            return Err(mlua::Error::external(e));
+        }
+    };
+
     if args.trim {
-        Ok(s.trim_end_matches(['\r', '\n']).to_string())
+        Ok(Some(s.trim_end_matches(['\r', '\n']).to_string()))
     } else {
-        Ok(s)
+        Ok(Some(s))
     }
 }
 
@@ -581,21 +602,314 @@ fn write_value_stderr(newline: bool, v: Value) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Returns ANSI escape code by spec (e.g., "reset", "bold", "red", "green", "yellow", "blue").
-/// This is intentionally minimal; expand as needed.
-fn ansi_code(spec: &str) -> String {
-    match spec.to_ascii_lowercase().as_str() {
-        "reset" => "\x1b[0m".to_string(),
-        "bold" => "\x1b[1m".to_string(),
-        "dim" => "\x1b[2m".to_string(),
-        "underline" => "\x1b[4m".to_string(),
-        "red" => "\x1b[31m".to_string(),
-        "green" => "\x1b[32m".to_string(),
-        "yellow" => "\x1b[33m".to_string(),
-        "blue" => "\x1b[34m".to_string(),
-        "magenta" => "\x1b[35m".to_string(),
-        "cyan" => "\x1b[36m".to_string(),
-        "gray" | "grey" => "\x1b[90m".to_string(),
-        _ => String::new(),
+// --- ANSI submodule ----------------------------------------------------------
+
+fn ansi_table(lua: &Lua) -> mlua::Result<Table> {
+    let ansi = lua.create_table()?;
+
+    // Styles
+    ansi.set("reset", "\x1b[0m")?;
+    ansi.set("bold", "\x1b[1m")?;
+    ansi.set("dim", "\x1b[2m")?;
+    ansi.set("italic", "\x1b[3m")?;
+    ansi.set("underline", "\x1b[4m")?;
+    ansi.set("blink", "\x1b[5m")?;
+    ansi.set("reverse", "\x1b[7m")?;
+    ansi.set("hidden", "\x1b[8m")?;
+    ansi.set("strike", "\x1b[9m")?;
+
+    // Cursor / clearing helpers
+    ansi.set("clear_line", "\x1b[2K")?;
+    ansi.set("clear_screen", "\x1b[2J")?;
+    ansi.set("home", "\x1b[H")?;
+
+    // Foreground colors
+    ansi.set("black", "\x1b[30m")?;
+    ansi.set("red", "\x1b[31m")?;
+    ansi.set("green", "\x1b[32m")?;
+    ansi.set("yellow", "\x1b[33m")?;
+    ansi.set("blue", "\x1b[34m")?;
+    ansi.set("magenta", "\x1b[35m")?;
+    ansi.set("cyan", "\x1b[36m")?;
+    ansi.set("white", "\x1b[37m")?;
+    ansi.set("default", "\x1b[39m")?;
+
+    // Bright foreground colors
+    ansi.set("bright_black", "\x1b[90m")?;
+    ansi.set("bright_red", "\x1b[91m")?;
+    ansi.set("bright_green", "\x1b[92m")?;
+    ansi.set("bright_yellow", "\x1b[93m")?;
+    ansi.set("bright_blue", "\x1b[94m")?;
+    ansi.set("bright_magenta", "\x1b[95m")?;
+    ansi.set("bright_cyan", "\x1b[96m")?;
+    ansi.set("bright_white", "\x1b[97m")?;
+
+    // Background colors
+    ansi.set("bg_black", "\x1b[40m")?;
+    ansi.set("bg_red", "\x1b[41m")?;
+    ansi.set("bg_green", "\x1b[42m")?;
+    ansi.set("bg_yellow", "\x1b[43m")?;
+    ansi.set("bg_blue", "\x1b[44m")?;
+    ansi.set("bg_magenta", "\x1b[45m")?;
+    ansi.set("bg_cyan", "\x1b[46m")?;
+    ansi.set("bg_white", "\x1b[47m")?;
+    ansi.set("bg_default", "\x1b[49m")?;
+
+    // Bright background colors
+    ansi.set("bg_bright_black", "\x1b[100m")?;
+    ansi.set("bg_bright_red", "\x1b[101m")?;
+    ansi.set("bg_bright_green", "\x1b[102m")?;
+    ansi.set("bg_bright_yellow", "\x1b[103m")?;
+    ansi.set("bg_bright_blue", "\x1b[104m")?;
+    ansi.set("bg_bright_magenta", "\x1b[105m")?;
+    ansi.set("bg_bright_cyan", "\x1b[106m")?;
+    ansi.set("bg_bright_white", "\x1b[107m")?;
+
+    Ok(ansi)
+}
+
+// --- Progress indicator ------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum ProgressStream {
+    Stdout,
+    Stderr,
+}
+
+impl ProgressStream {
+    fn is_tty(&self) -> bool {
+        match self {
+            Self::Stdout => io::stdout().is_terminal(),
+            Self::Stderr => io::stderr().is_terminal(),
+        }
+    }
+
+    fn write_all(&self, s: &str) {
+        match self {
+            Self::Stdout => {
+                print!("{s}");
+                io::stdout().flush().ok();
+            }
+            Self::Stderr => {
+                eprint!("{s}");
+                io::stderr().flush().ok();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProgressArgs {
+    total: Option<u64>,
+    message: Option<String>,
+    width: usize,
+    stream: ProgressStream,
+}
+
+fn parse_progress_args(mut mv: MultiValue) -> mlua::Result<ProgressArgs> {
+    if mv.is_empty() {
+        return Ok(ProgressArgs {
+            total: None,
+            message: None,
+            width: 40,
+            stream: ProgressStream::Stderr,
+        });
+    }
+
+    if mv.len() == 1 {
+        match mv.pop_front().unwrap() {
+            Value::Integer(i) => {
+                let total = u64::try_from(i.max(0)).map_err(mlua::Error::external)?;
+                return Ok(ProgressArgs {
+                    total: Some(total),
+                    message: None,
+                    width: 40,
+                    stream: ProgressStream::Stderr,
+                });
+            }
+            Value::Number(n) => {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let total = n.max(0.0) as u64;
+                return Ok(ProgressArgs {
+                    total: Some(total),
+                    message: None,
+                    width: 40,
+                    stream: ProgressStream::Stderr,
+                });
+            }
+            Value::Table(t) => {
+                let total = match t.get::<Option<Value>>("total")? {
+                    Some(Value::Integer(i)) => Some(u64::try_from(i.max(0)).map_err(mlua::Error::external)?),
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    Some(Value::Number(n)) => Some(n.max(0.0) as u64),
+                    _ => None,
+                };
+
+                let message = t.get::<Option<String>>("message")?;
+                let width = t.get::<Option<usize>>("width")?.unwrap_or(40).max(10);
+                let stream = match t
+                    .get::<Option<String>>("stream")?
+                    .unwrap_or_else(|| "stderr".to_string())
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "stdout" => ProgressStream::Stdout,
+                    _ => ProgressStream::Stderr,
+                };
+
+                return Ok(ProgressArgs {
+                    total,
+                    message,
+                    width,
+                    stream,
+                });
+            }
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "progress expects a table or a number, got {other:?}"
+                )));
+            }
+        }
+    }
+
+    Err(mlua::Error::external("progress expects at most one argument"))
+}
+
+#[derive(Clone, Debug)]
+struct Progress {
+    total: Option<u64>,
+    current: u64,
+    message: Option<String>,
+    width: usize,
+    stream: ProgressStream,
+    enabled: bool,
+    started: std::time::Instant,
+    last_render: std::time::Instant,
+    spinner_idx: usize,
+    finished: bool,
+}
+
+impl Progress {
+    fn new(args: ProgressArgs) -> Self {
+        let now = std::time::Instant::now();
+        let enabled = args.stream.is_tty();
+        Self {
+            total: args.total,
+            current: 0,
+            message: args.message,
+            width: args.width,
+            stream: args.stream,
+            enabled,
+            started: now,
+            last_render: now,
+            spinner_idx: 0,
+            finished: false,
+        }
+    }
+
+    fn render(&mut self, force: bool) {
+        if self.finished {
+            return;
+        }
+
+        // Avoid excessive redraw.
+        let now = std::time::Instant::now();
+        if !force && now.duration_since(self.last_render) < std::time::Duration::from_millis(50) {
+            return;
+        }
+        self.last_render = now;
+
+        if !self.enabled {
+            return;
+        }
+
+        let elapsed = now.duration_since(self.started);
+        let secs = elapsed.as_secs();
+
+        let prefix = self.message.as_deref().unwrap_or("");
+
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let line = if let Some(total) = self.total {
+            let total = total.max(1);
+            let cur = self.current.min(total);
+            let ratio = (cur as f64) / (total as f64);
+            let filled = ((ratio * (self.width as f64)).round() as usize).min(self.width);
+            let empty = self.width.saturating_sub(filled);
+            let pct = (ratio * 100.0).round() as u64;
+
+            format!(
+                "\r\x1b[2K{prefix}[{}{}] {}/{} ({}%) {}s",
+                "#".repeat(filled),
+                "-".repeat(empty),
+                cur,
+                total,
+                pct,
+                secs
+            )
+        } else {
+            let frames = ['|', '/', '-', '\\'];
+            let ch = frames[self.spinner_idx % frames.len()];
+            self.spinner_idx = self.spinner_idx.wrapping_add(1);
+            format!("\r\x1b[2K{prefix}{ch} {secs}s")
+        };
+
+        self.stream.write_all(&line);
+    }
+
+    fn finish(&mut self, msg: Option<String>) {
+        if self.finished {
+            return;
+        }
+
+        if let Some(m) = msg {
+            self.message = Some(m);
+        }
+        self.render(true);
+
+        if self.enabled {
+            self.stream.write_all("\n");
+        }
+        self.finished = true;
+    }
+}
+
+impl UserData for Progress {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("tick", |_, this, delta: Option<i64>| {
+            #[allow(clippy::cast_sign_loss)]
+            let d = delta.unwrap_or(1).max(0) as u64;
+            this.current = this.current.saturating_add(d);
+            // Force render when total reached.
+            let force = this.total.is_some_and(|t| t > 0 && this.current >= t);
+            this.render(force);
+            Ok(this.clone())
+        });
+
+        methods.add_method_mut("set", |_, this, value: i64| {
+            this.current = u64::try_from(value.max(0)).map_err(mlua::Error::external)?;
+            this.render(false);
+            Ok(this.clone())
+        });
+
+        methods.add_method_mut("total", |_, this, total: i64| {
+            this.total = Some(u64::try_from(total.max(0)).map_err(mlua::Error::external)?);
+            this.render(true);
+            Ok(this.clone())
+        });
+
+        methods.add_method_mut("message", |_, this, msg: String| {
+            this.message = Some(msg);
+            this.render(true);
+            Ok(this.clone())
+        });
+
+        methods.add_method_mut("finish", |_, this, msg: Option<String>| {
+            this.finish(msg);
+            Ok(true)
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Progress(total={:?}, current={})", this.total, this.current))
+        });
     }
 }

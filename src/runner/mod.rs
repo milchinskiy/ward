@@ -1,12 +1,17 @@
 use mlua::{ChunkMode, HookTriggers, Lua, LuaOptions, StdLib, VmState};
 use std::{
     path::Path,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 use tokio::fs;
 
 pub mod sandbox;
 use sandbox::SandboxPolicy;
+
+const TICK_EVERY: u32 = 1024;
 
 /// Runs a lua file
 /// # Errors [`crate::Error`]
@@ -18,20 +23,25 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     lua.set_memory_limit(policy.memory_limit_bytes)
         .map_err(crate::Error::from)?;
 
-    let hook_step: u64 = policy.instruction_limit.clamp(1, 10_000);
+    // Strict instruction limiting: never exceed the configured limit.
+    //
+    // We hook every instruction and decrement by 1. To keep overhead reasonable,
+    // we only run the (slightly heavier) lifecycle tick every TICK_EVERY instructions.
     let remaining = Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit));
+    let tick_counter = Arc::new(AtomicU32::new(0));
     {
         let remaining = remaining.clone();
+        let tick_counter = tick_counter.clone();
         lua.set_hook(
             HookTriggers {
                 #[allow(clippy::cast_possible_truncation)]
-                every_nth_instruction: Some(hook_step as u32),
+                every_nth_instruction: Some(1),
                 ..HookTriggers::default()
             },
             move |lua, _debug| {
                 let left_after = remaining
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(hook_step))
-                    .map(|prev| prev - hook_step)
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(1))
+                    .map(|prev| prev - 1)
                     .unwrap_or(0);
 
                 if left_after == 0 {
@@ -40,7 +50,11 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
 
                 // Drain pending signals and interrupt execution if shutdown requested.
                 // This must be fast and non-blocking.
-                crate::lua::lifecycle::tick(lua)?;
+                // We do it only periodically to reduce per-instruction overhead.
+                let c = tick_counter.fetch_add(1, Ordering::Relaxed);
+                if (c & (TICK_EVERY - 1)) == (TICK_EVERY - 1) {
+                    crate::lua::lifecycle::tick(lua)?;
+                }
                 Ok(VmState::Continue)
             },
         )?;

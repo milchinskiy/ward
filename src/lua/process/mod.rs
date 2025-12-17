@@ -36,6 +36,7 @@ struct Cmd {
 #[derive(Clone)]
 struct Pipeline {
     specs: Vec<CmdSpec>,
+    pipefail: bool,
 }
 
 #[derive(Clone)]
@@ -142,11 +143,11 @@ impl UserData for Cmd {
 
         // terminal operations
         methods.add_async_method("run", |_, this, ()| async move {
-            run_pipeline(vec![this.spec.clone()], RunMode::Inherit).await
+            run_pipeline(vec![this.spec.clone()], false, RunMode::Inherit).await
         });
 
         methods.add_async_method("output", |_, this, ()| async move {
-            run_pipeline(vec![this.spec.clone()], RunMode::Capture).await
+            run_pipeline(vec![this.spec.clone()], false, RunMode::Capture).await
         });
 
         // cmd1 | cmd2
@@ -156,16 +157,27 @@ impl UserData for Cmd {
 
 impl UserData for Pipeline {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("pipefail", |_, this, yes: Option<bool>| {
+            this.pipefail = yes.unwrap_or(true);
+            Ok(this.clone())
+        });
+
         methods.add_method("pipe", |_, this, rhs: Value| {
             let mut specs = this.specs.clone();
             match rhs {
                 Value::UserData(ud) => {
                     if let Ok(cmd) = ud.borrow::<Cmd>() {
                         specs.push(cmd.spec.clone());
-                        Ok(Self { specs })
+                        Ok(Self {
+                            specs,
+                            pipefail: this.pipefail,
+                        })
                     } else if let Ok(p) = ud.borrow::<Self>() {
                         specs.extend(p.specs.clone());
-                        Ok(Self { specs })
+                        Ok(Self {
+                            specs,
+                            pipefail: this.pipefail || p.pipefail,
+                        })
                     } else {
                         Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
                     }
@@ -175,11 +187,11 @@ impl UserData for Pipeline {
         });
 
         methods.add_async_method("run", |_, this, ()| async move {
-            run_pipeline(this.specs.clone(), RunMode::Inherit).await
+            run_pipeline(this.specs.clone(), this.pipefail, RunMode::Inherit).await
         });
 
         methods.add_async_method("output", |_, this, ()| async move {
-            run_pipeline(this.specs.clone(), RunMode::Capture).await
+            run_pipeline(this.specs.clone(), this.pipefail, RunMode::Capture).await
         });
 
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| {
@@ -188,10 +200,16 @@ impl UserData for Pipeline {
                 Value::UserData(ud) => {
                     if let Ok(cmd) = ud.borrow::<Cmd>() {
                         specs.push(cmd.spec.clone());
-                        Ok(Self { specs })
+                        Ok(Self {
+                            specs,
+                            pipefail: this.pipefail,
+                        })
                     } else if let Ok(p) = ud.borrow::<Self>() {
                         specs.extend(p.specs.clone());
-                        Ok(Self { specs })
+                        Ok(Self {
+                            specs,
+                            pipefail: this.pipefail || p.pipefail,
+                        })
                     } else {
                         Err(mlua::Error::RuntimeError("operator | expects Cmd or Pipeline".into()))
                     }
@@ -208,11 +226,15 @@ fn pipe_value(lhs: CmdSpec, rhs: Value) -> LuaResult<Pipeline> {
             if let Ok(cmd) = ud.borrow::<Cmd>() {
                 Ok(Pipeline {
                     specs: vec![lhs, cmd.spec.clone()],
+                    pipefail: false,
                 })
             } else if let Ok(p) = ud.borrow::<Pipeline>() {
                 let mut specs = vec![lhs];
                 specs.extend(p.specs.clone());
-                Ok(Pipeline { specs })
+                Ok(Pipeline {
+                    specs,
+                    pipefail: p.pipefail,
+                })
             } else {
                 Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into()))
             }
@@ -274,7 +296,7 @@ fn apply_common_opts(cmd: &mut Command, spec: &CmdSpec) {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResult> {
+async fn run_pipeline(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode) -> LuaResult<ProcResult> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
     }
@@ -509,8 +531,14 @@ async fn run_pipeline(specs: Vec<CmdSpec>, mode: RunMode) -> LuaResult<ProcResul
         }
     }
 
+    let ok = if pipefail {
+        steps.iter().all(|c| *c == 0)
+    } else {
+        code == 0
+    };
+
     Ok(ProcResult {
-        ok: code == 0,
+        ok,
         code,
         signal,
         stdout,
