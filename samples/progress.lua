@@ -7,7 +7,7 @@ local function sleep_ms(ms)
   -- if you have time.sleep(ms) as awaitable:
   -- return time.sleep(ms)()
   -- otherwise adapt to your actual time module.
-  return time.sleep(ms / 1000):wait()
+  return time.sleep(ms / 1000)()
 end
 
 local ansi = term.ansi
@@ -44,7 +44,7 @@ do
     sleep_ms(15)
 
     -- update progress and optional message
-    p:set(i)
+    p:value(i)
     if i == 1 then
       p:message("Connecting")
     elseif i == 20 then
@@ -61,7 +61,7 @@ print()
 
 -- 3) Using term.confirm + progress (typical shell script flow)
 do
-  local ok = term.confirm({ question = "Run a slow task?", default = false }):wait()
+  local ok = term.confirm({ question = "Run a slow task?", default = false })()
   if not ok then
     print("Canceled.")
     return
@@ -69,8 +69,8 @@ do
 
   local p = term.progress({ total = 5, message = "Slow task" })
   for i = 1, 5 do
-    p:set(i)
-    p:message(("Step %d/5"):format(i))
+    p:value(i)
+    p:message(("Step %d/5"):format(p:value()))
     sleep_ms(250)
   end
   p:finish(ansi.cyan .. "Complete" .. ansi.reset)

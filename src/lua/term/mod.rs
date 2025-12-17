@@ -828,7 +828,11 @@ impl Progress {
 
         let prefix = self.message.as_deref().unwrap_or("");
 
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let line = if let Some(total) = self.total {
             let total = total.max(1);
             let cur = self.current.min(total);
@@ -882,25 +886,40 @@ impl UserData for Progress {
             // Force render when total reached.
             let force = this.total.is_some_and(|t| t > 0 && this.current >= t);
             this.render(force);
-            Ok(this.clone())
+            Ok(Value::Nil)
         });
 
-        methods.add_method_mut("set", |_, this, value: i64| {
-            this.current = u64::try_from(value.max(0)).map_err(mlua::Error::external)?;
-            this.render(false);
-            Ok(this.clone())
+        methods.add_method_mut("value", |_, this, value: Option<i64>| {
+            if let Some(value) = value {
+                this.current = u64::try_from(value.max(0)).map_err(mlua::Error::external)?;
+                this.render(false);
+                Ok(Value::Nil)
+            } else {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(Value::Integer(this.current as i64))
+            }
         });
 
-        methods.add_method_mut("total", |_, this, total: i64| {
-            this.total = Some(u64::try_from(total.max(0)).map_err(mlua::Error::external)?);
-            this.render(true);
-            Ok(this.clone())
+        methods.add_method_mut("total", |_, this, total: Option<i64>| {
+            if let Some(total) = total {
+                this.total = Some(u64::try_from(total.max(0)).map_err(mlua::Error::external)?);
+                this.render(true);
+                Ok(Value::Nil)
+            } else {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(Value::Integer(this.total.unwrap_or(0) as i64))
+            }
         });
 
-        methods.add_method_mut("message", |_, this, msg: String| {
-            this.message = Some(msg);
-            this.render(true);
-            Ok(this.clone())
+        methods.add_method_mut("message", |lua, this, msg: Option<String>| {
+            if let Some(msg) = msg {
+                this.message = Some(msg);
+                this.render(true);
+                return Ok(Value::Nil);
+            }
+
+            let msg = this.message.clone().unwrap_or(String::new());
+            Ok(Value::String(lua.create_string(&msg)?))
         });
 
         methods.add_method_mut("finish", |_, this, msg: Option<String>| {
