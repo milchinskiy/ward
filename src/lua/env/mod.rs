@@ -17,6 +17,10 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // WARN: Rust marks env mutation as unsafe because concurrent access across 
+    // threads is UB. With Tokio (threadpool, blocking pool) and libraries 
+    // (reqwest, sysinfo, etc.) we cannot reliably guarantee no concurrent env reads.
+    // TODO: Find a better way to make this safe
     env_table.set(
         "set",
         lua.create_function(|_, (key, value): (String, String)| {

@@ -1,11 +1,82 @@
 #![allow(clippy::unnecessary_wraps)]
 
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use mlua::{Lua, LuaSerdeExt, Table, UserData, UserDataFields, UserDataMethods, Value};
 use reqwest::redirect;
 use reqwest::{Client, Response};
 use serde_json::Value as JsonValue;
+
+/// Cached `reqwest::Client` instances by effective client configuration.
+static CLIENT_CACHE: OnceLock<Mutex<HashMap<ClientKey, Client>>> = OnceLock::new();
+
+#[derive(Copy, Clone, Debug, Eq)]
+struct ClientKey {
+    timeout_nanos: Option<u64>,
+    follow_redirects: bool,
+}
+
+impl PartialEq for ClientKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.timeout_nanos == other.timeout_nanos && self.follow_redirects == other.follow_redirects
+    }
+}
+
+impl Hash for ClientKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.timeout_nanos.hash(state);
+        self.follow_redirects.hash(state);
+    }
+}
+
+fn client_cache() -> &'static Mutex<HashMap<ClientKey, Client>> {
+    CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn duration_to_nanos_u64(d: Duration) -> u64 {
+    // Duration::as_nanos() is u128. Saturate to u64 for hashing.
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn get_or_build_client(options: &HttpOptions) -> mlua::Result<Client> {
+    let key = ClientKey {
+        timeout_nanos: options.timeout.map(duration_to_nanos_u64),
+        follow_redirects: options.follow_redirects,
+    };
+
+    // Fast path: cache hit.
+    if let Ok(guard) = client_cache().lock()
+        && let Some(existing) = guard.get(&key)
+    {
+        return Ok(existing.clone());
+    }
+
+    // Build outside of the lock.
+    let mut builder = Client::builder();
+    if let Some(timeout) = options.timeout {
+        builder = builder.timeout(timeout);
+    }
+
+    builder = if options.follow_redirects {
+        builder.redirect(redirect::Policy::limited(10))
+    } else {
+        builder.redirect(redirect::Policy::none())
+    };
+
+    let client = builder.build().map_err(mlua::Error::external)?;
+
+    // Cache insert (best-effort; if poisoned/contended, still return the client).
+    if let Ok(mut guard) = client_cache().lock() {
+        guard.entry(key).or_insert_with(|| client.clone());
+    }
+
+    Ok(client)
+}
 
 /// Initializes the `http` module
 /// # Errors [`mlua::Error`]
@@ -182,18 +253,7 @@ fn value_to_string(value: Value) -> mlua::Result<String> {
 
 async fn request_async(method: &str, url: &str, opts: Value, body: Body) -> mlua::Result<HttpResponse> {
     let options = parse_options(opts, body)?;
-    let mut builder = Client::builder();
-    if let Some(timeout) = options.timeout {
-        builder = builder.timeout(timeout);
-    }
-
-    builder = if options.follow_redirects {
-        builder.redirect(redirect::Policy::limited(10))
-    } else {
-        builder.redirect(redirect::Policy::none())
-    };
-
-    let client = builder.build().map_err(mlua::Error::external)?;
+    let client = get_or_build_client(&options)?;
 
     // Build request
     let method = method.parse().map_err(mlua::Error::external)?;

@@ -324,11 +324,17 @@ local io = require("ward.io")
 
 Ward serializes reads/writes with internal mutexes so concurrent operations do not interleave unpredictably.
 
-### 5.1 `io.read_all() -> string`
+### 5.1 `io.read_all(opts?) -> string`
 Reads all remaining stdin into a string.
+
+Optional `opts`:
+- `max_bytes` (number|integer) — if provided, fails when stdin exceeds this limit.
 
 ```lua
 local s = io.read_all()
+
+-- hard cap (1 MiB)
+local s2 = io.read_all({ max_bytes = 1024 * 1024 })
 ```
 
 ### 5.2 `io.read_line() -> string|nil`

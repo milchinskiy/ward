@@ -15,19 +15,35 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let stderr = Arc::new(Mutex::new(io::stderr()));
 
-    // read_all(): async -> String
+    // read_all(opts?): async -> String
+    // opts can be:
+    //   - nil / omitted: unlimited
+    //   - number/integer: max_bytes
+    //   - table: { max_bytes = number|integer }
     table.set(
         "read_all",
         lua.create_async_function({
             let stdin = Arc::clone(&stdin);
-            move |_lua, ()| {
+            move |_lua, opts: Option<Value>| {
                 let stdin = Arc::clone(&stdin);
                 async move {
+                    let max_bytes = parse_max_bytes(opts.unwrap_or(Value::Nil))?;
                     let mut guard = stdin.lock().await;
-                    let mut buffer = String::new();
-                    guard.read_to_string(&mut buffer).await.map_err(mlua::Error::external)?;
+                    let mut buf: Vec<u8> = Vec::new();
+                    if let Some(max) = max_bytes {
+                        // Read up to max+1 so we can detect overflow without allocating unbounded memory.
+                        let mut limited = (&mut *guard).take(max.saturating_add(1));
+                        limited.read_to_end(&mut buf).await.map_err(mlua::Error::external)?;
+                        if (buf.len() as u64) > max {
+                            return Err(mlua::Error::external(format!("stdin exceeds max_bytes ({max})")));
+                        }
+                    } else {
+                        guard.read_to_end(&mut buf).await.map_err(mlua::Error::external)?;
+                    }
                     drop(guard);
-                    Ok(buffer)
+
+                    let s = String::from_utf8(buf).map_err(mlua::Error::external)?;
+                    Ok(s)
                 }
             }
         })?,
@@ -171,4 +187,25 @@ fn read_lines(lua: &Lua, stdin: Arc<Mutex<BufReader<io::Stdin>>>) -> mlua::Resul
     })?;
 
     Ok(Value::Function(iter))
+}
+
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn parse_max_bytes(opts: Value) -> mlua::Result<Option<u64>> {
+    match opts {
+        Value::Nil => Ok(None),
+        Value::Integer(i) => Ok((i > 0).then_some(i as u64)),
+        Value::Number(n) => Ok((n.is_finite() && n > 0.0).then_some(n as u64)),
+        Value::Table(t) => {
+            let v = t.get::<Option<Value>>("max_bytes")?;
+            match v {
+                None | Some(Value::Nil) => Ok(None),
+                Some(Value::Integer(i)) => Ok((i > 0).then_some(i as u64)),
+                Some(Value::Number(n)) => Ok((n.is_finite() && n > 0.0).then_some(n as u64)),
+                Some(other) => Err(mlua::Error::external(format!("max_bytes must be number, got {other:?}"))),
+            }
+        }
+        other => Err(mlua::Error::external(format!(
+            "read_all(opts) expects nil, number, or table, got {other:?}"
+        ))),
+    }
 }
