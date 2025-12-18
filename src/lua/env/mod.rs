@@ -1,69 +1,196 @@
 use mlua::{Lua, Table};
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    path::Path,
+    sync::{Arc, RwLock},
+};
+
+/// Ward-local environment overlay.
+/// - `ward.env.set/unset` affect only this overlay
+/// - `ward.env.get/list/is_exists/which/is_in_path` resolve the overlay first
+/// - child process spawning can apply the overlay to the `Command` environment
+#[derive(Clone, Default)]
+pub struct EnvOverlay {
+    inner: Arc<RwLock<HashMap<String, Option<String>>>>,
+}
+
+impl EnvOverlay {
+    pub fn set(&self, key: String, value: String) {
+        let mut map = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insert(key, Some(value));
+    }
+
+    pub fn unset(&self, key: String) {
+        let mut map = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insert(key, None);
+    }
+
+    pub fn clear(&self) {
+        let mut map = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.clear();
+    }
+
+    /// Returns:
+    /// - `Some(Some(v))` if overridden to `v`
+    /// - `Some(None)` if explicitly unset
+    /// - `None` if not present in overlay
+    pub fn lookup(&self, key: &str) -> Option<Option<String>> {
+        let map = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.get(key).cloned()
+    }
+
+    pub fn snapshot(&self) -> HashMap<String, Option<String>> {
+        let map = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.clone()
+    }
+}
+
+fn ensure_overlay(lua: &Lua) -> EnvOverlay {
+    lua.app_data_ref::<EnvOverlay>().map_or_else(
+        || {
+            let o = EnvOverlay::default();
+            lua.set_app_data(o.clone());
+            o
+        },
+        |o| o.clone(),
+    )
+}
+
+/// Returns a snapshot of the current overlay.
+///
+/// This is used by subprocess spawners to apply the overlay to child environments.
+/// # Errors [`mlua::Error`]
+pub fn overlay_snapshot(lua: &Lua) -> mlua::Result<HashMap<String, Option<String>>> {
+    Ok(ensure_overlay(lua).snapshot())
+}
+
+fn effective_var_os(overlay: &EnvOverlay, key: &str) -> Option<OsString> {
+    match overlay.lookup(key) {
+        Some(Some(v)) => Some(OsString::from(v)),
+        Some(None) => None,
+        None => std::env::var_os(key),
+    }
+}
+
+fn effective_var_string(overlay: &EnvOverlay, key: &str) -> Option<String> {
+    effective_var_os(overlay, key).map(|v| v.to_string_lossy().into_owned())
+}
+
+fn effective_env_map(overlay: &EnvOverlay) -> HashMap<String, String> {
+    // Start with the real environment.
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in std::env::vars_os() {
+        out.insert(k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned());
+    }
+
+    // Apply overlay modifications.
+    for (k, vv) in overlay.snapshot() {
+        match vv {
+            Some(v) => {
+                out.insert(k, v);
+            }
+            None => {
+                out.remove(&k);
+            }
+        }
+    }
+
+    out
+}
 
 /// Lua Environment methods
 /// # Errors [`mlua::Error`]
+#[allow(clippy::too_many_lines)]
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
+    let overlay = ensure_overlay(lua);
     let env_table = lua.create_table()?;
 
     env_table.set(
         "get",
-        lua.create_function(|_, (key, default): (String, Option<String>)| {
-            if key.is_empty() {
-                return Ok(default);
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, (key, default): (String, Option<String>)| {
+                if key.is_empty() {
+                    return Ok(default);
+                }
+                Ok(effective_var_string(&overlay, &key).or(default))
             }
-
-            Ok(std::env::var_os(&key).map_or(default, |value| Some(value.to_string_lossy().into_owned())))
         })?,
     )?;
 
-    // WARN: Rust marks env mutation as unsafe because concurrent access across 
-    // threads is UB. With Tokio (threadpool, blocking pool) and libraries 
+    // WARN: Rust marks env mutation as unsafe because concurrent access across
+    // threads is UB. With Tokio (threadpool, blocking pool) and libraries
     // (reqwest, sysinfo, etc.) we cannot reliably guarantee no concurrent env reads.
     // TODO: Find a better way to make this safe
     env_table.set(
         "set",
-        lua.create_function(|_, (key, value): (String, String)| {
-            if !is_valid_key(&key) || value.contains('\0') {
-                return Ok(false);
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, (key, value): (String, String)| {
+                if !is_valid_key(&key) || value.contains('\0') {
+                    return Ok(false);
+                }
+                overlay.set(key, value);
+                Ok(true)
             }
-
-            // SAFETY: Environment changes are marked unsafe in std. Inputs are validated to avoid
-            // interior NUL or unsupported keys before mutating the process environment.
-            unsafe { std::env::set_var(key, value) };
-            Ok(true)
         })?,
     )?;
 
     env_table.set(
         "unset",
-        lua.create_function(|_, key: String| {
-            if !is_valid_key(&key) {
-                return Ok(false);
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, key: String| {
+                if !is_valid_key(&key) {
+                    return Ok(false);
+                }
+                overlay.unset(key);
+                Ok(true)
             }
+        })?,
+    )?;
 
-            // SAFETY: Environment mutation is unsafe in std; the key is validated to avoid UB.
-            unsafe { std::env::remove_var(key) };
-            Ok(true)
+    env_table.set(
+        "clear",
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, ()| {
+                overlay.clear();
+                Ok(())
+            }
         })?,
     )?;
 
     env_table.set(
         "list",
-        lua.create_function(|lua_ctx, ()| {
-            let table = lua_ctx.create_table()?;
-
-            for (key, value) in std::env::vars_os() {
-                table.set(key.to_string_lossy(), value.to_string_lossy())?;
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |lua_ctx, ()| {
+                let table = lua_ctx.create_table()?;
+                for (k, v) in effective_env_map(&overlay) {
+                    table.set(k, v)?;
+                }
+                Ok(table)
             }
-
-            Ok(table)
         })?,
     )?;
 
     env_table.set(
         "is_exists",
-        lua.create_function(|_, key: String| Ok(!key.is_empty() && std::env::var_os(key).is_some()))?,
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, key: String| {
+                if key.is_empty() {
+                    return Ok(false);
+                }
+                match overlay.lookup(&key) {
+                    Some(Some(_)) => Ok(true),
+                    Some(None) => Ok(false),
+                    None => Ok(std::env::var_os(key).is_some()),
+                }
+            }
+        })?,
     )?;
 
     env_table.set(
@@ -74,8 +201,28 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    env_table.set("which", lua.create_function(|_, name: String| Ok(which(&name)))?)?;
-    env_table.set("is_in_path", lua.create_function(|_, name: String| Ok(which(&name).is_some()))?)?;
+    env_table.set(
+        "which",
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, name: String| {
+                let path = effective_var_os(&overlay, "PATH");
+                let pathext = effective_var_os(&overlay, "PATHEXT");
+                Ok(which_with_env(&name, path.as_deref(), pathext.as_deref()))
+            }
+        })?,
+    )?;
+
+    env_table.set(
+        "is_in_path",
+        lua.create_function({
+            move |_, name: String| {
+                let path = effective_var_os(&overlay, "PATH");
+                let pathext = effective_var_os(&overlay, "PATHEXT");
+                Ok(which_with_env(&name, path.as_deref(), pathext.as_deref()).is_some())
+            }
+        })?,
+    )?;
 
     Ok(env_table)
 }
@@ -84,12 +231,12 @@ fn is_valid_key(key: &str) -> bool {
     !key.is_empty() && !key.contains('=') && !key.contains('\0') && !key.starts_with('=')
 }
 
-fn which(name: &str) -> Option<String> {
+fn which_with_env(name: &str, path: Option<&OsStr>, pathext_var: Option<&OsStr>) -> Option<String> {
     if name.is_empty() {
         return None;
     }
 
-    let path_exts = pathext();
+    let path_exts = pathext(pathext_var);
 
     if contains_separator(name) {
         let path = Path::new(name);
@@ -106,8 +253,8 @@ fn which(name: &str) -> Option<String> {
         return None;
     }
 
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
+    if let Some(paths) = path {
+        for dir in std::env::split_paths(paths) {
             if dir.as_os_str().is_empty() {
                 continue;
             }
@@ -133,7 +280,7 @@ fn probe_explicit(path: &Path, exts: &[String]) -> Option<String> {
         if path.extension().is_none() {
             for ext in exts {
                 let mut with_ext = path.to_path_buf();
-                // For "C:\bin\git" => "C:\bin\git.exe" etc.
+                // For "C:\\bin\\git" => "C:\\bin\\git.exe" etc.
                 // ext includes the dot (".EXE")
                 with_ext.set_extension(ext.trim_start_matches('.'));
                 if candidate_is_executable(&with_ext, exts) {
@@ -167,7 +314,7 @@ fn probe_path(dir: &Path, name: &str, exts: &[String]) -> Option<String> {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-fn pathext() -> Vec<String> {
+fn pathext(var: Option<&OsStr>) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("PATHEXT")
@@ -199,6 +346,7 @@ fn pathext() -> Vec<String> {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = var;
         Vec::new()
     }
 }

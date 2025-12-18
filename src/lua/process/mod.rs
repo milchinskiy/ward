@@ -200,14 +200,16 @@ impl UserData for Cmd {
         methods.add_method("pipe", |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
 
         // terminal operations
-        methods.add_async_method("run", |_, this, ()| {
+        methods.add_async_method("run", |lua, this, ()| {
             let spec = this.snapshot();
-            async move { run_pipeline(vec![spec], false, RunMode::Inherit).await }
+            let overlay = crate::lua::env::overlay_snapshot(&lua);
+            async move { run_pipeline(vec![spec], false, RunMode::Inherit, overlay?).await }
         });
 
-        methods.add_async_method("output", |_, this, ()| {
+        methods.add_async_method("output", |lua, this, ()| {
             let spec = this.snapshot();
-            async move { run_pipeline(vec![spec], false, RunMode::Capture).await }
+            let overlay = crate::lua::env::overlay_snapshot(&lua);
+            async move { run_pipeline(vec![spec], false, RunMode::Capture, overlay?).await }
         });
 
         // cmd1 | cmd2
@@ -249,14 +251,16 @@ impl UserData for Pipeline {
             _ => Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into())),
         });
 
-        methods.add_async_method("run", |_, this, ()| {
+        methods.add_async_method("run", |lua, this, ()| {
             let (specs, pipefail) = this.snapshot();
-            async move { run_pipeline(specs, pipefail, RunMode::Inherit).await }
+            let overlay = crate::lua::env::overlay_snapshot(&lua);
+            async move { run_pipeline(specs, pipefail, RunMode::Inherit, overlay?).await }
         });
 
-        methods.add_async_method("output", |_, this, ()| {
+        methods.add_async_method("output", |lua, this, ()| {
             let (specs, pipefail) = this.snapshot();
-            async move { run_pipeline(specs, pipefail, RunMode::Capture).await }
+            let overlay = crate::lua::env::overlay_snapshot(&lua);
+            async move { run_pipeline(specs, pipefail, RunMode::Capture, overlay?).await }
         });
 
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| {
@@ -277,6 +281,15 @@ impl UserData for Pipeline {
                 _ => Err(mlua::Error::RuntimeError("operator | expects Cmd or Pipeline".into())),
             }
         });
+    }
+}
+
+fn apply_env_overlay(cmd: &mut Command, overlay: &HashMap<String, Option<String>>) {
+    for (k, v) in overlay {
+        match v {
+            Some(val) => cmd.env(k, val),
+            None => cmd.env_remove(k),
+        };
     }
 }
 
@@ -351,7 +364,12 @@ fn apply_common_opts(cmd: &mut Command, spec: &CmdSpec) {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_pipeline(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode) -> LuaResult<ProcResult> {
+async fn run_pipeline(
+    specs: Vec<CmdSpec>,
+    pipefail: bool,
+    mode: RunMode,
+    overlay: HashMap<String, Option<String>>,
+) -> LuaResult<ProcResult> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
     }
@@ -365,6 +383,7 @@ async fn run_pipeline(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode) -> Lua
         let mut c = Command::new(&spec.program);
         c.kill_on_drop(true);
         c.args(&spec.args);
+        apply_env_overlay(&mut c, &overlay);
         apply_common_opts(&mut c, spec);
 
         // stdin:

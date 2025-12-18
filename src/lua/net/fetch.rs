@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,7 +30,10 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     // fetch.git(url, opts) -> FetchResponse  (async)
     fetch_table.set(
         "git",
-        lua.create_async_function(|_, (url, opts): (String, Value)| async move { fetch_git_async(&url, opts).await })?,
+        lua.create_async_function(|lua, (url, opts): (String, Value)| {
+            let overlay = crate::lua::env::overlay_snapshot(&lua);
+            async move { fetch_git_async(&url, opts, overlay?).await }
+        })?,
     )?;
 
     Ok(fetch_table)
@@ -255,7 +259,11 @@ async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> 
     Ok(response)
 }
 
-async fn fetch_git_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> {
+async fn fetch_git_async(
+    url: &str,
+    opts: Value,
+    overlay: HashMap<String, Option<String>>,
+) -> mlua::Result<FetchResponse> {
     let options = GitOptions::from_value(opts)?;
     let target = options.into.clone().unwrap_or_else(|| unique_path("fetch-git"));
     if let Some(parent) = target.parent() {
@@ -280,7 +288,7 @@ async fn fetch_git_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> 
     clone_args.push(url.to_string());
     clone_args.push(path_to_string(&target));
 
-    let clone_result = run_git_command_async(&clone_args, options.timeout).await?;
+    let clone_result = run_git_command_async(&clone_args, options.timeout, &overlay).await?;
 
     if !clone_result.ok {
         let _ = fs::remove_dir_all(&target).await;
@@ -295,7 +303,7 @@ async fn fetch_git_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> 
 
     if let Some(rev) = options.rev {
         let checkout_args = vec!["-C".to_string(), path_to_string(&target), "checkout".to_string(), rev];
-        let checkout_result = run_git_command_async(&checkout_args, options.timeout).await?;
+        let checkout_result = run_git_command_async(&checkout_args, options.timeout, &overlay).await?;
         if !checkout_result.ok {
             let _ = fs::remove_dir_all(&target).await;
             let response = FetchResponse {
@@ -338,13 +346,25 @@ struct CommandResult {
     ok: bool,
 }
 
-async fn run_git_command_async(args: &[String], timeout: Option<Duration>) -> mlua::Result<CommandResult> {
+async fn run_git_command_async(
+    args: &[String],
+    timeout: Option<Duration>,
+    overlay: &HashMap<String, Option<String>>,
+) -> mlua::Result<CommandResult> {
     let mut cmd = Command::new("git");
     cmd.kill_on_drop(true);
     cmd.args(args);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
+
+    // Apply Ward-local env overlay to the child process.
+    for (k, v) in overlay {
+        match v {
+            Some(val) => cmd.env(k, val),
+            None => cmd.env_remove(k),
+        };
+    }
 
     let mut child = cmd.spawn().map_err(mlua::Error::external)?;
 
