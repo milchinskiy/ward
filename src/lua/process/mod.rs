@@ -363,6 +363,7 @@ async fn run_pipeline(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode) -> Lua
 
     for (i, spec) in specs.iter().enumerate() {
         let mut c = Command::new(&spec.program);
+        c.kill_on_drop(true);
         c.args(&spec.args);
         apply_common_opts(&mut c, spec);
 

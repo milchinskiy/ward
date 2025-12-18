@@ -340,6 +340,7 @@ struct CommandResult {
 
 async fn run_git_command_async(args: &[String], timeout: Option<Duration>) -> mlua::Result<CommandResult> {
     let mut cmd = Command::new("git");
+    cmd.kill_on_drop(true);
     cmd.args(args);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
