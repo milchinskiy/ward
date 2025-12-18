@@ -225,23 +225,28 @@ impl UserData for Pipeline {
             Ok(this.clone())
         });
 
-        methods.add_method("pipe", |_, this, rhs: Value| {
-            let (mut specs, pipefail) = this.snapshot();
-            match rhs {
-                Value::UserData(ud) => {
-                    if let Ok(cmd) = ud.borrow::<Cmd>() {
-                        specs.push(cmd.snapshot());
-                        Ok(Self::new(specs, pipefail))
-                    } else if let Ok(p) = ud.borrow::<Self>() {
-                        let (p_specs, p_pipefail) = p.snapshot();
-                        specs.extend(p_specs);
-                        Ok(Self::new(specs, pipefail || p_pipefail))
-                    } else {
-                        Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
-                    }
+        methods.add_method_mut("pipe", |_, this, rhs: Value| match rhs {
+            Value::UserData(ud) => {
+                if let Ok(cmd) = ud.borrow::<Cmd>() {
+                    let rhs_spec = cmd.snapshot();
+                    this.inner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .specs
+                        .push(rhs_spec);
+                    Ok(this.clone())
+                } else if let Ok(p) = ud.borrow::<Self>() {
+                    let (p_specs, p_pipefail) = p.snapshot();
+                    let mut st = this.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    st.specs.extend(p_specs);
+                    st.pipefail = st.pipefail || p_pipefail;
+                    drop(st);
+                    Ok(this.clone())
+                } else {
+                    Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
                 }
-                _ => Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into())),
             }
+            _ => Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into())),
         });
 
         methods.add_async_method("run", |_, this, ()| {
