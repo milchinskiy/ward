@@ -474,11 +474,13 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::R
                 while let Ok(Some(ent)) = rd.next_entry().await {
                     let p = ent.path();
                     let ft = ent.file_type().await.ok();
-                    if let Some(ft) = ft
-                        && ft.is_dir()
-                        && !ft.is_symlink()
-                    {
-                        queue.push_back(p.clone());
+                    if let Some(ft) = ft {
+                        if ft.is_symlink() {
+                            continue;
+                        }
+                        if ft.is_dir() {
+                            queue.push_back(p.clone());
+                        }
                     }
 
                     #[cfg(unix)]
@@ -493,6 +495,13 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::R
                 }
             }
 
+            // Avoid mutating symlink targets in recursive chmod.
+            if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
+                && meta.file_type().is_symlink()
+            {
+                continue;
+            }
+
             #[cfg(unix)]
             {
                 if tokio::fs::set_permissions(&current, perms.clone()).await.is_err() {
@@ -504,6 +513,13 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::R
             }
         }
     } else {
+        if let Ok(meta) = tokio::fs::symlink_metadata(&target).await
+            && meta.file_type().is_symlink()
+        {
+            // WARN: For safety, we do not follow symlinks.
+            return Ok(options.force);
+        }
+
         #[cfg(unix)]
         {
             if tokio::fs::set_permissions(&target, perms).await.is_err() && !options.force {
@@ -535,12 +551,15 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
                     while let Ok(Some(ent)) = rd.next_entry().await {
                         let p = ent.path();
                         let ft = ent.file_type().await.ok();
-                        if let Some(ft) = ft
-                            && ft.is_dir()
-                            && !ft.is_symlink()
-                        {
-                            queue.push_back(p.clone());
+                        if let Some(ft) = ft {
+                            if ft.is_symlink() {
+                                continue;
+                            }
+                            if ft.is_dir() {
+                                queue.push_back(p.clone());
+                            }
                         }
+
                         if apply(&p).is_err() {
                             success = false;
                             if !options.force {
@@ -550,6 +569,13 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
                     }
                 }
 
+                // Avoid mutating symlink targets in recursive chown.
+                if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
+                    && meta.file_type().is_symlink()
+                {
+                    continue;
+                }
+
                 if apply(&current).is_err() {
                     success = false;
                     if !options.force {
@@ -557,6 +583,11 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
                     }
                 }
             }
+        } else if let Ok(meta) = tokio::fs::symlink_metadata(&target).await
+            && meta.file_type().is_symlink()
+        {
+            // WARN: For safety, we do not follow symlinks.
+            return Ok(options.force);
         } else if apply(&target).is_err() && !options.force {
             success = false;
         }
@@ -569,6 +600,18 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
 }
 
 async fn maybe_force_remove(dest: &Path) {
+    // WARN: Avoid following symlinks during force removal.
+    if let Ok(meta) = tokio::fs::symlink_metadata(dest).await {
+        if meta.file_type().is_symlink() || meta.is_file() {
+            let _ = tokio::fs::remove_file(dest).await;
+            return;
+        }
+        if meta.is_dir() {
+            let _ = tokio::fs::remove_dir_all(dest).await;
+            return;
+        }
+    }
+
     let _ = tokio::fs::remove_file(dest).await;
     let _ = tokio::fs::remove_dir_all(dest).await;
 }
