@@ -2,6 +2,14 @@
 
 use mlua::{Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods, Value};
 use std::io::{self, IsTerminal, Write};
+use std::sync::OnceLock;
+use tokio::sync::Mutex as AsyncMutex;
+
+static INPUT_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+fn input_lock() -> &'static AsyncMutex<()> {
+    INPUT_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
 
 /// Module init
 /// # Errors [`mlua::Error`]
@@ -418,6 +426,10 @@ async fn input_wait(lua: &Lua, this: &mut InputAwaitable) -> mlua::Result<MultiV
         return Err(mlua::Error::external("input awaitable already consumed (create a new one)"));
     }
     this.consumed = true;
+
+    // NOTE: Serialize interactive input. Without this, concurrent :wait() calls can interleave
+    // reads on stdin and corrupt prompts.
+    let _guard = input_lock().lock().await;
 
     // Move data into blocking closure
     let kind = this.kind.clone();
