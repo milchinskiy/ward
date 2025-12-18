@@ -2,7 +2,7 @@
 
 This document is a user-facing reference for the Ward Lua runtime: modules, functions, userdata types, and common patterns.
 
-> Scope: this guide is written against the `ward-4` codebase.
+> Scope: this guide is written against the `ward-5` codebase.
 
 ---
 
@@ -677,26 +677,188 @@ p:finish("Done")
 
 ---
 
-## 9. `ward.net` — HTTP and fetching
+## 9. `ward.net` — HTTP requests and fetching
 
 ```lua
-local net = require("ward.net")
-local http = require("ward.net.http")
+local net   = require("ward.net")
+local http  = require("ward.net.http")
 local fetch = require("ward.net.fetch")
 ```
 
-### 9.1 `ward.net.fetch`
-Fetch provides higher-level helpers for downloading.
+`ward.net` groups network-related helpers. Today it exposes two submodules:
 
-- `fetch.url(url, opts?) -> bytes string|ProcResult` (depending on API)
+- `ward.net.http` — in-process HTTP requests via `reqwest`
+- `ward.net.fetch` — higher-level “fetch into a file/dir” helpers
 
-> Note: refer to the module’s exported function list in your source tree; the API is intentionally small and is designed to compose with `fs.write`.
+### 9.1 `ward.net.http` — HTTP request primitives
 
-### 9.2 `ward.net.http`
-HTTP provides request/response primitives.
+#### Functions
 
-> Note: refer to the module’s exported function list in your source tree; the API is intentionally small and focuses on correctness over breadth.
+All functions below are **async** (implemented with `create_async_function`). Call them normally and receive a `HttpResponse` userdata.
 
+- `http.get(url, opts?) -> HttpResponse`
+- `http.delete(url, opts?) -> HttpResponse`
+- `http.options(url, opts?) -> HttpResponse`
+- `http.post(url, opts?) -> HttpResponse`
+- `http.put(url, opts?) -> HttpResponse`
+
+#### Options (`opts` table)
+
+`opts` is optional. When omitted or not a table, defaults are applied.
+
+- `query` (table) — query parameters.
+  - Keys are strings.
+  - Values must be `string`, `number`, `integer`, or `boolean` (they are converted to strings).
+- `headers` (table) — header map: `string -> string`.
+- `timeout` (number) — request timeout in **seconds** (float accepted). Must be positive and finite.
+- `follow_redirects` (boolean, default `true`) — when enabled, redirects are followed (limited to 10).
+- `allow_error` (boolean, default `false`) —
+  - `false`: non-2xx responses raise a runtime error.
+  - `true`: non-2xx responses are returned as `HttpResponse`.
+
+Body options (used by `post` and `put`):
+
+- `json` (any) — serializable Lua value encoded as JSON.
+- `form` (table) — form fields `string -> string`.
+
+If both `json` and `form` are present, JSON takes precedence.
+
+#### `HttpResponse` userdata
+
+Returned by `http.*` functions.
+
+Fields (also available via methods):
+
+- `resp.status` (integer) — HTTP status code.
+- `resp.headers` (table) — header map `string -> string`.
+  - Note: duplicate header names will be overwritten in the table (last one wins).
+- `resp.body` (string|nil) — response body decoded as text.
+
+Methods:
+
+- `resp:is_ok() -> boolean` — true for 2xx.
+- `resp:status() -> integer`
+- `resp:headers() -> table`
+- `resp:body() -> string|nil`
+
+Examples:
+
+```lua
+local http = require("ward.net.http")
+
+-- Basic GET
+local r = http.get("https://example.com", { follow_redirects = true })
+print(r.status)
+print(r:is_ok())
+
+-- Query + headers
+local r2 = http.get("https://httpbin.org/get", {
+  query = { q = "ward", page = 1, debug = true },
+  headers = { ["User-Agent"] = "ward" },
+  timeout = 10,
+  allow_error = true,
+})
+print(r2.status)
+print(r2:body())
+
+-- POST JSON
+local r3 = http.post("https://httpbin.org/post", {
+  json = { hello = "world", n = 1 },
+  headers = { ["Content-Type"] = "application/json" },
+})
+assert(r3:is_ok())
+```
+
+### 9.2 `ward.net.fetch` — fetch into a file/dir
+
+`fetch` is for “download/checkout into a path” workflows that compose well with `ward.fs`.
+
+#### `fetch.url(url, opts?) -> FetchResponse`
+
+Downloads the response body as bytes into a file (streaming), then returns metadata.
+
+Options (`opts` table):
+
+- `method` (string, default `"GET"`) — one of: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`.
+- `headers` (table) — header map `string -> string`.
+- `timeout` (number) — request timeout in **seconds**.
+- `follow_redirects` (boolean, default `true`) — redirects are followed (limited to 10).
+- `into` (string|nil) — destination file path.
+  - If omitted, Ward creates a unique file path under the OS temp directory.
+- `max_bytes` (integer|number|nil) — maximum allowed response size.
+  - Values `<= 0` disable the limit.
+  - If the limit is exceeded, Ward removes the partial file and returns `ok=false` with `status=413` and `path=nil`.
+
+`FetchResponse` userdata fields/methods:
+
+- `resp.ok` / `resp:is_ok() -> boolean`
+- `resp.status` / `resp:status() -> integer` — HTTP status code (or `413` if `max_bytes` exceeded).
+- `resp.path` / `resp:path() -> string|nil` — destination path.
+- `resp.size` / `resp:size() -> integer` — bytes written.
+
+Example:
+
+```lua
+local fetch = require("ward.net.fetch")
+local fs    = require("ward.fs")
+
+local r = fetch.url("https://example.com/file.tar.gz", {
+  into = "./downloads/file.tar.gz",
+  max_bytes = 50 * 1024 * 1024,
+})
+
+if not r.ok then
+  error("fetch failed: status=" .. tostring(r.status))
+end
+
+print("saved to", r.path, "bytes", r.size)
+assert(fs.is_file(r.path))
+```
+
+#### `fetch.git(url, opts?) -> FetchResponse`
+
+Clones a Git repository into a directory (using the external `git` command), then optionally checks out a revision.
+
+Notes:
+- Requires `git` to be installed and discoverable in `PATH`.
+- `git` stdout/stderr are suppressed; use `ok`/`status` to handle errors.
+
+Options (`opts` table):
+
+- `into` (string|nil) — destination directory.
+  - If omitted, Ward creates a unique directory under the OS temp directory.
+- `depth` (integer|nil) — shallow clone depth (must be > 0). Defaults to `1`.
+- `filter_blobs` (boolean, default `true`) — when true, uses `--filter=blob:none`.
+- `branch` (string|nil) — clone a specific branch.
+- `tag` (string|nil) — clone a specific tag (used as `--branch <tag>`).
+  - If both `branch` and `tag` are set, `branch` takes precedence.
+- `recursive` (boolean, default `false`) — when true, uses `--recurse-submodules`.
+- `rev` (string|nil) — if set, runs `git checkout <rev>` after cloning.
+- `timeout` (number|nil) — command timeout in **seconds**.
+- `max_bytes` (integer|number|nil) — maximum allowed on-disk size for the cloned directory.
+  - If exceeded, Ward removes the directory and returns `ok=false` with `status=413` and `path=nil`.
+
+On success, `FetchResponse.status` is `0` and `ok=true`. On failure, `status` is the `git` exit code.
+
+Example:
+
+```lua
+local fetch = require("ward.net.fetch")
+
+local r = fetch.git("https://github.com/user/repo.git", {
+  into = "./vendor/repo",
+  depth = 1,
+  rev = "v1.2.3",
+  recursive = false,
+  timeout = 120,
+})
+
+if not r.ok then
+  error("git fetch failed: exit=" .. tostring(r.status))
+end
+
+print("checked out into", r.path, "bytes", r.size)
+```
 ---
 
 ## 10. `ward.convert` — serialization formats

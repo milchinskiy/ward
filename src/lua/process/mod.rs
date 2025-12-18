@@ -1,10 +1,15 @@
 use mlua::{Lua, MetaMethod, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
+    sync::Mutex as AsyncMutex,
     time,
 };
 
@@ -30,13 +35,49 @@ enum StdinSpec {
 
 #[derive(Clone)]
 struct Cmd {
-    spec: CmdSpec,
+    // Shared builder state: cloning `Cmd` keeps a handle to the *same* spec.
+    // This preserves Lua chaining semantics without copying the full object.
+    spec: Arc<Mutex<CmdSpec>>,
 }
 
 #[derive(Clone)]
 struct Pipeline {
+    // Shared pipeline state for fluent mutation (e.g. :pipefail()).
+    inner: Arc<Mutex<PipelineState>>,
+}
+
+#[derive(Clone)]
+struct PipelineState {
     specs: Vec<CmdSpec>,
     pipefail: bool,
+}
+
+impl Cmd {
+    fn new(spec: CmdSpec) -> Self {
+        Self {
+            spec: Arc::new(Mutex::new(spec)),
+        }
+    }
+
+    fn snapshot(&self) -> CmdSpec {
+        self.spec
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Pipeline {
+    fn new(specs: Vec<CmdSpec>, pipefail: bool) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PipelineState { specs, pipefail })),
+        }
+    }
+
+    fn snapshot(&self) -> (Vec<CmdSpec>, bool) {
+        let st = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (st.specs.clone(), st.pipefail)
+    }
 }
 
 #[derive(Clone)]
@@ -93,35 +134,46 @@ impl UserData for ProcResult {
 
 impl UserData for Cmd {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // fluent builders
         methods.add_method_mut("cwd", |_, this, path: String| {
-            this.spec.cwd = Some(PathBuf::from(path));
+            this.spec.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cwd = Some(PathBuf::from(path));
             Ok(this.clone())
         });
 
         methods.add_method_mut("env", |_, this, (k, v): (String, String)| {
-            this.spec.env.insert(k, v);
+            this.spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .env
+                .insert(k, v);
             Ok(this.clone())
         });
 
         methods.add_method_mut("envs", |_, this, t: Table| {
+            let mut spec = this.spec.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for pair in t.pairs::<Value, Value>() {
                 let (k, v) = pair?;
                 if let (Value::String(ks), Value::String(vs)) = (k, v) {
-                    this.spec.env.insert(ks.to_str()?.to_string(), vs.to_str()?.to_string());
+                    spec.env.insert(ks.to_str()?.to_string(), vs.to_str()?.to_string());
                 }
             }
+            drop(spec);
             Ok(this.clone())
         });
 
         #[allow(clippy::cast_sign_loss)]
         methods.add_method_mut("timeout", |_, this, ms: i64| {
-            this.spec.timeout_ms = Some(ms.max(0) as u64);
+            this.spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .timeout_ms = Some(ms.max(0) as u64);
             Ok(this.clone())
         });
 
         methods.add_method_mut("stdin", |_, this, data: Value| {
-            this.spec.stdin = match data {
+            this.spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stdin = match data {
                 Value::String(s) => StdinSpec::Bytes(s.as_bytes().to_vec()),
                 _ => StdinSpec::Inherit,
             };
@@ -129,55 +181,61 @@ impl UserData for Cmd {
         });
 
         methods.add_method_mut("stdin_file", |_, this, path: String| {
-            this.spec.stdin = StdinSpec::File(PathBuf::from(path));
+            this.spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stdin = StdinSpec::File(PathBuf::from(path));
             Ok(this.clone())
         });
 
         methods.add_method_mut("stderr_to_stdout", |_, this, yes: Option<bool>| {
-            this.spec.stderr_to_stdout = yes.unwrap_or(true);
+            this.spec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stderr_to_stdout = yes.unwrap_or(true);
             Ok(this.clone())
         });
 
         // cmd:pipe(cmd_or_pipeline)
-        methods.add_method("pipe", |_, this, rhs: Value| pipe_value(this.spec.clone(), rhs));
+        methods.add_method("pipe", |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
 
         // terminal operations
-        methods.add_async_method("run", |_, this, ()| async move {
-            run_pipeline(vec![this.spec.clone()], false, RunMode::Inherit).await
+        methods.add_async_method("run", |_, this, ()| {
+            let spec = this.snapshot();
+            async move { run_pipeline(vec![spec], false, RunMode::Inherit).await }
         });
 
-        methods.add_async_method("output", |_, this, ()| async move {
-            run_pipeline(vec![this.spec.clone()], false, RunMode::Capture).await
+        methods.add_async_method("output", |_, this, ()| {
+            let spec = this.snapshot();
+            async move { run_pipeline(vec![spec], false, RunMode::Capture).await }
         });
 
         // cmd1 | cmd2
-        methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| pipe_value(this.spec.clone(), rhs));
+        methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
     }
 }
 
 impl UserData for Pipeline {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("pipefail", |_, this, yes: Option<bool>| {
-            this.pipefail = yes.unwrap_or(true);
+            this.inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pipefail = yes.unwrap_or(true);
             Ok(this.clone())
         });
 
         methods.add_method("pipe", |_, this, rhs: Value| {
-            let mut specs = this.specs.clone();
+            let (mut specs, pipefail) = this.snapshot();
             match rhs {
                 Value::UserData(ud) => {
                     if let Ok(cmd) = ud.borrow::<Cmd>() {
-                        specs.push(cmd.spec.clone());
-                        Ok(Self {
-                            specs,
-                            pipefail: this.pipefail,
-                        })
+                        specs.push(cmd.snapshot());
+                        Ok(Self::new(specs, pipefail))
                     } else if let Ok(p) = ud.borrow::<Self>() {
-                        specs.extend(p.specs.clone());
-                        Ok(Self {
-                            specs,
-                            pipefail: this.pipefail || p.pipefail,
-                        })
+                        let (p_specs, p_pipefail) = p.snapshot();
+                        specs.extend(p_specs);
+                        Ok(Self::new(specs, pipefail || p_pipefail))
                     } else {
                         Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
                     }
@@ -186,30 +244,27 @@ impl UserData for Pipeline {
             }
         });
 
-        methods.add_async_method("run", |_, this, ()| async move {
-            run_pipeline(this.specs.clone(), this.pipefail, RunMode::Inherit).await
+        methods.add_async_method("run", |_, this, ()| {
+            let (specs, pipefail) = this.snapshot();
+            async move { run_pipeline(specs, pipefail, RunMode::Inherit).await }
         });
 
-        methods.add_async_method("output", |_, this, ()| async move {
-            run_pipeline(this.specs.clone(), this.pipefail, RunMode::Capture).await
+        methods.add_async_method("output", |_, this, ()| {
+            let (specs, pipefail) = this.snapshot();
+            async move { run_pipeline(specs, pipefail, RunMode::Capture).await }
         });
 
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| {
-            let mut specs = this.specs.clone();
+            let (mut specs, pipefail) = this.snapshot();
             match rhs {
                 Value::UserData(ud) => {
                     if let Ok(cmd) = ud.borrow::<Cmd>() {
-                        specs.push(cmd.spec.clone());
-                        Ok(Self {
-                            specs,
-                            pipefail: this.pipefail,
-                        })
+                        specs.push(cmd.snapshot());
+                        Ok(Self::new(specs, pipefail))
                     } else if let Ok(p) = ud.borrow::<Self>() {
-                        specs.extend(p.specs.clone());
-                        Ok(Self {
-                            specs,
-                            pipefail: this.pipefail || p.pipefail,
-                        })
+                        let (p_specs, p_pipefail) = p.snapshot();
+                        specs.extend(p_specs);
+                        Ok(Self::new(specs, pipefail || p_pipefail))
                     } else {
                         Err(mlua::Error::RuntimeError("operator | expects Cmd or Pipeline".into()))
                     }
@@ -224,17 +279,12 @@ fn pipe_value(lhs: CmdSpec, rhs: Value) -> LuaResult<Pipeline> {
     match rhs {
         Value::UserData(ud) => {
             if let Ok(cmd) = ud.borrow::<Cmd>() {
-                Ok(Pipeline {
-                    specs: vec![lhs, cmd.spec.clone()],
-                    pipefail: false,
-                })
+                Ok(Pipeline::new(vec![lhs, cmd.snapshot()], false))
             } else if let Ok(p) = ud.borrow::<Pipeline>() {
+                let (p_specs, p_pipefail) = p.snapshot();
                 let mut specs = vec![lhs];
-                specs.extend(p.specs.clone());
-                Ok(Pipeline {
-                    specs,
-                    pipefail: p.pipefail,
-                })
+                specs.extend(p_specs);
+                Ok(Pipeline::new(specs, p_pipefail))
             } else {
                 Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into()))
             }
@@ -250,7 +300,7 @@ enum RunMode {
 
 async fn pump_to_shared_stdin<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     mut reader: R,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Arc<AsyncMutex<ChildStdin>>,
 ) {
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -381,7 +431,7 @@ async fn run_pipeline(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode) -> Lua
             .take()
             .ok_or_else(|| mlua::Error::RuntimeError("missing stdin for pipe".into()))?;
 
-        let shared = Arc::new(Mutex::new(in_next));
+        let shared = Arc::new(AsyncMutex::new(in_next));
         link_tasks.push(tokio::spawn(pump_to_shared_stdin(out, shared.clone())));
 
         if specs[i].stderr_to_stdout
@@ -607,13 +657,11 @@ pub fn define(lua: &Lua) -> LuaResult<Table> {
         "cmd",
         lua.create_function(|_, (prog, args): (String, Variadic<Value>)| {
             let args = parse_cmd_args(args)?;
-            Ok(Cmd {
-                spec: CmdSpec {
-                    program: prog,
-                    args,
-                    ..Default::default()
-                },
-            })
+            Ok(Cmd::new(CmdSpec {
+                program: prog,
+                args,
+                ..Default::default()
+            }))
         })?,
     )?;
 
@@ -626,13 +674,11 @@ pub fn define(lua: &Lua) -> LuaResult<Table> {
             #[cfg(not(windows))]
             let (prog, args) = ("sh".to_string(), vec!["-lc".to_string(), script]);
 
-            Ok(Cmd {
-                spec: CmdSpec {
-                    program: prog,
-                    args,
-                    ..Default::default()
-                },
-            })
+            Ok(Cmd::new(CmdSpec {
+                program: prog,
+                args,
+                ..Default::default()
+            }))
         })?,
     )?;
 
