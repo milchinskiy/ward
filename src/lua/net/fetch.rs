@@ -11,7 +11,6 @@ use std::{
 use futures_util::StreamExt;
 use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods, Value};
 use reqwest::{Method, redirect};
-
 use tokio::{fs, io::AsyncWriteExt, process::Command, time};
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);

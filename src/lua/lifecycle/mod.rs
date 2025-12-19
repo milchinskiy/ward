@@ -191,8 +191,6 @@ impl LifecycleManager {
     }
 }
 
-// ---------- Public Rust helpers for the runner/hook ----------
-
 fn get_mgr(lua: &Lua) -> Option<AppDataRef<'_, LifecycleManager>> {
     lua.app_data_ref::<LifecycleManager>()
 }
@@ -339,8 +337,6 @@ pub fn run_shutdown(lua: &Lua, reason: ShutdownReason, error: Option<String>) ->
 
     Ok(())
 }
-
-// ---------- Lua-facing module ----------
 
 /// Initialize lifecycle module
 /// # Errors [`mlua::Error`]

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use mlua::{Lua, Table, Value};
-use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 /// Initializes the `io` module
 /// # Errors [`mlua::Error`]
@@ -10,10 +9,7 @@ use tokio::sync::Mutex;
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
-    // Shared handles (serialized with async Mutex to prevent concurrent reads/writes)
-    let stdin = Arc::new(Mutex::new(BufReader::new(io::stdin())));
-    let stdout = Arc::new(Mutex::new(io::stdout()));
-    let stderr = Arc::new(Mutex::new(io::stderr()));
+    let console = super::console::console(lua);
 
     // read_all(opts?): async -> String
     // opts can be:
@@ -23,12 +19,12 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "read_all",
         lua.create_async_function({
-            let stdin = Arc::clone(&stdin);
+            let console = console.clone();
             move |_lua, opts: Option<Value>| {
-                let stdin = Arc::clone(&stdin);
+                let console = console.clone();
                 async move {
                     let max_bytes = parse_max_bytes(opts.unwrap_or(Value::Nil))?;
-                    let mut guard = stdin.lock().await;
+                    let mut guard = console.stdin.lock().await;
                     let mut buf: Vec<u8> = Vec::new();
                     if let Some(max) = max_bytes {
                         // Read up to max+1 so we can detect overflow without allocating unbounded memory.
@@ -54,12 +50,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "read_line",
         lua.create_async_function({
-            let stdin = Arc::clone(&stdin);
+            let console = console.clone();
             move |_lua, ()| {
-                let stdin = Arc::clone(&stdin);
+                let console = console.clone();
                 async move {
-                    let mut guard = stdin.lock().await;
-
+                    let mut guard = console.stdin.lock().await;
                     let mut line = String::new();
                     let bytes = guard.read_line(&mut line).await.map_err(mlua::Error::external)?;
                     drop(guard);
@@ -85,8 +80,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "read_lines",
         lua.create_function({
-            let stdin = Arc::clone(&stdin);
-            move |lua, ()| read_lines(lua, Arc::clone(&stdin))
+            let console = console.clone();
+            move |lua, ()| read_lines(lua, console.clone())
         })?,
     )?;
 
@@ -94,11 +89,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "write_stdout",
         lua.create_async_function({
-            let stdout = Arc::clone(&stdout);
+            let console = console.clone();
             move |_lua, text: String| {
-                let stdout = Arc::clone(&stdout);
+                let console = console.clone();
                 async move {
-                    let mut out = stdout.lock().await;
+                    let mut out = console.stdout.lock().await;
                     out.write_all(text.as_bytes()).await.map_err(mlua::Error::external)?;
                     drop(out);
                     Ok(true)
@@ -111,11 +106,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "write_stderr",
         lua.create_async_function({
-            let stderr = Arc::clone(&stderr);
+            let console = console.clone();
             move |_lua, text: String| {
-                let stderr = Arc::clone(&stderr);
+                let console = console.clone();
                 async move {
-                    let mut err = stderr.lock().await;
+                    let mut err = console.stderr.lock().await;
                     err.write_all(text.as_bytes()).await.map_err(mlua::Error::external)?;
                     drop(err);
                     Ok(true)
@@ -128,11 +123,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "flush_stdout",
         lua.create_async_function({
-            let stdout = Arc::clone(&stdout);
+            let console = console.clone();
             move |_lua, ()| {
-                let stdout = Arc::clone(&stdout);
+                let console = console.clone();
                 async move {
-                    let mut out = stdout.lock().await;
+                    let mut out = console.stdout.lock().await;
                     out.flush().await.map_err(mlua::Error::external)?;
                     drop(out);
                     Ok(())
@@ -145,11 +140,10 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     table.set(
         "flush_stderr",
         lua.create_async_function({
-            let stderr = Arc::clone(&stderr);
             move |_lua, ()| {
-                let stderr = Arc::clone(&stderr);
+                let console = console.clone();
                 async move {
-                    let mut err = stderr.lock().await;
+                    let mut err = console.stderr.lock().await;
                     err.flush().await.map_err(mlua::Error::external)?;
                     drop(err);
                     Ok(())
@@ -161,12 +155,12 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     Ok(table)
 }
 
-fn read_lines(lua: &Lua, stdin: Arc<Mutex<BufReader<io::Stdin>>>) -> mlua::Result<Value> {
+fn read_lines(lua: &Lua, console: Arc<super::console::Console>) -> mlua::Result<Value> {
     // This returned function is async; each call reads one line from shared stdin.
     let iter = lua.create_async_function(move |_lua, ()| {
-        let stdin = Arc::clone(&stdin);
+        let console = Arc::clone(&console);
         async move {
-            let mut guard = stdin.lock().await;
+            let mut guard = console.stdin.lock().await;
             let mut line = String::new();
             let bytes = guard.read_line(&mut line).await.map_err(mlua::Error::external)?;
             drop(guard);

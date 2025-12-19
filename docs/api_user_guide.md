@@ -2,8 +2,6 @@
 
 This document is a user-facing reference for the Ward Lua runtime: modules, functions, userdata types, and common patterns.
 
-> Scope: this guide is written against the `ward-5` codebase.
-
 ---
 
 ## 1. Mental model
@@ -73,11 +71,23 @@ end
 
 ## 3. `ward.env` — environment and PATH tools
 
+Ward uses an environment overlay:
+
+- `env.set` / `env.unset` / `env.clear` modify Ward’s overlay only (they do not mutate the process-global OS environment).
+- Read operations (`env.get` / `env.list` / `env.is_exists` / `env.which` / `env.is_in_path`) resolve the effective environment: the process environment plus overlay modifications (overlay wins).
+- The overlay is applied to child processes spawned via `ward.process` and to the git invocations used by `ward.net.fetch.git`.
+For child processes, precedence is: process env → Ward overlay → per-command overrides (Cmd:env / Cmd:envs).
+
+Used to inspect and modify environment/Ward variables.
+Mutations are applied to the current process via local Ward env variables overlay to
+keep it safe in async contexts.
+
 ```lua
 local env = require("ward.env")
 ```
 
 ### 3.1 `env.get(key, default?) -> string|nil`
+
 Get environment variable `key`. If missing (or `key` is empty), returns `default`.
 
 ```lua
@@ -86,21 +96,28 @@ local port = env.get("PORT", "8080")
 ```
 
 ### 3.2 `env.set(key, value) -> true`
-Set an environment variable.
+
+Set an environment variable in the Ward overlay.
 
 ```lua
 env.set("FOO", "bar")
 ```
 
 ### 3.3 `env.unset(key) -> true`
-Remove an environment variable.
+
+Remove an environment variable (from the overlay).
 
 ```lua
 env.unset("FOO")
 ```
 
-### 3.4 `env.list() -> table`
-Returns a table of the current process environment.
+### 3.4 `env.clear() -> true`
+
+Clears all overlay modifications (restores the effective environment back to the base process environment).
+
+### 3.5 `env.list() -> table`
+
+Returns a table of the effective environment (base process env with overlay applied).
 
 Example (print all):
 
@@ -111,8 +128,9 @@ for k, v in pairs(t) do
 end
 ```
 
-### 3.5 `env.is_exists(key) -> boolean`
-Returns `true` if variable exists.
+### 3.6 `env.is_exists(key) -> boolean`
+
+Returns `true` if variable exists in the effective environment.
 
 ```lua
 if env.is_exists("CI") then
@@ -120,10 +138,12 @@ if env.is_exists("CI") then
 end
 ```
 
-### 3.6 `env.hostname() -> string`
+### 3.7 `env.hostname() -> string`
+
 Returns hostname.
 
-### 3.7 `env.which(name) -> string|nil`
+### 3.8 `env.which(name) -> string|nil`
+
 Searches `PATH` (and Windows `PATHEXT`) for an executable.
 
 ```lua
@@ -131,7 +151,8 @@ local git = env.which("git")
 assert(git, "git not found")
 ```
 
-### 3.8 `env.is_in_path(path_or_name) -> boolean`
+### 3.9 `env.is_in_path(path_or_name) -> boolean`
+
 Returns whether a candidate is reachable via `PATH` search.
 
 ---
@@ -184,9 +205,11 @@ print(fs.basename(p))
 ### 4.3 Directory listing and globbing
 
 #### `fs.list(path, opts?) -> table`
+
 Returns an array-like table of paths.
 
 Options (`opts` table):
+
 - `recursive` (boolean, default `false`)
 - `depth` (integer, default `0`) — recursion depth limit; `0` means unlimited
 - `dirs` (boolean, default `false`) — include directories
@@ -194,6 +217,7 @@ Options (`opts` table):
 - `regex` (string|nil) — regex filter applied to the full path string
 
 Notes:
+
 - If both `dirs` and `files` are `false` (the default), both directories and files are included.
 - Ordering is OS-dependent (Ward does not currently sort results).
 
@@ -210,6 +234,7 @@ local files = fs.list("src", { recursive = true, depth = 3, files = true })
 ```
 
 #### `fs.glob(pattern) -> table`
+
 Returns an array-like table of paths matching a glob pattern.
 
 ```lua
@@ -221,11 +246,13 @@ end
 ### 4.4 Directories and removal
 
 #### `fs.mkdir(path, opts?) -> boolean`
+
 Create directory.
 
 Options:
+
 - `recursive` (boolean, default `false`)
-- `mode` (number, unix-only; default `0o644`)
+- `mode` (number, unix-only; default `0o755`)
 - `force` (boolean, default `false`) — treat “already exists” as success
 
 ```lua
@@ -233,9 +260,11 @@ fs.mkdir("build", { recursive = true, mode = 0o755 })
 ```
 
 #### `fs.rm(path, opts?) -> boolean`
+
 Remove file or directory.
 
 Options:
+
 - `recursive` (boolean, default `false`) — required for directories
 - `force` (boolean, default `false`) — treat missing-path as success
 
@@ -244,6 +273,7 @@ fs.rm("build", { recursive = true, force = true })
 ```
 
 #### `fs.unlink(path, opts?) -> boolean`
+
 Remove a file (like `rm -f file`).
 
 ### 4.5 Permissions and links
@@ -257,9 +287,11 @@ Remove a file (like `rm -f file`).
 ### 4.6 Timestamps
 
 #### `fs.touch(path, opts?) -> boolean`
+
 Create file if missing and update timestamps.
 
 Options:
+
 - `force` (boolean, default `false`)
 - `recursive` (boolean, default `false`) — create parent directories first
 
@@ -270,12 +302,15 @@ fs.touch("logs/app.log", { recursive = true })
 ### 4.7 File IO
 
 #### `fs.read(path, opts?) -> bytes string`
+
 Reads a file and returns a Lua string containing raw bytes.
 
 Options:
+
 - `mode` (`"text"|"binary"`, default `"text"`)
 
 Notes:
+
 - In `"text"` mode Ward validates UTF-8; the returned Lua string still contains the original bytes.
 
 ```lua
@@ -283,15 +318,18 @@ local data = fs.read("README.md")
 ```
 
 #### `fs.write(path, data, opts?) -> boolean`
+
 Write data to a file.
 
 Options (selected):
+
 - `mode` (`"overwrite"|"append"|"prepend"|"binary"`, default `"overwrite"`)
 - `append` (boolean, optional convenience; equivalent to `mode="append"`)
 - `binary` (boolean, default `false`) — convert `data` as bytes
 - `force` (boolean, default `false`)
 
 Notes:
+
 - Ward does not automatically create parent directories; combine with `fs.mkdir(fs.dirname(path), {recursive=true})`.
 
 ```lua
@@ -307,6 +345,7 @@ fs.write("out.txt", "more\n", { mode = "append" })
 ### 4.9 Temporary directories
 
 #### `fs.tempdir(prefix?) -> string`
+
 Creates a temporary directory and returns its path.
 
 ```lua
@@ -325,9 +364,11 @@ local io = require("ward.io")
 Ward serializes reads/writes with internal mutexes so concurrent operations do not interleave unpredictably.
 
 ### 5.1 `io.read_all(opts?) -> string`
+
 Reads all remaining stdin into a string.
 
 Optional `opts`:
+
 - `max_bytes` (number|integer) — if provided, fails when stdin exceeds this limit.
 
 ```lua
@@ -338,6 +379,7 @@ local s2 = io.read_all({ max_bytes = 1024 * 1024 })
 ```
 
 ### 5.2 `io.read_line() -> string|nil`
+
 Reads one line from stdin.
 
 - Returns `nil` on EOF.
@@ -348,11 +390,15 @@ if line == nil then return end
 print("got:", line)
 ```
 
-### 5.3 `io.read_lines() -> table`
-Reads all remaining lines and returns an array-like table.
+### 5.3 `io.read_lines() -> function`
+
+Returns an iterator-like function. Each call reads one line from stdin and returns `string|nil` (nil on EOF).
 
 ```lua
-for _, line in ipairs(io.read_lines()) do
+local next_line = io.read_lines()
+while true do
+  local line = next_line()
+  if line == nil then break end
   print(line)
 end
 ```
@@ -361,8 +407,8 @@ end
 
 - `io.write_stdout(data) -> true`
 - `io.write_stderr(data) -> true`
-- `io.flush_stdout() -> true`
-- `io.flush_stderr() -> true`
+- `io.flush_stdout() -> nil`
+- `io.flush_stderr() -> nil`
 
 ```lua
 io.write_stdout("hello")
@@ -381,6 +427,7 @@ local process = require("ward.process")
 ### 6.1 Constructors
 
 #### `process.cmd(program, ...args) -> Cmd`
+
 Create a command.
 
 ```lua
@@ -388,6 +435,7 @@ local cmd = process.cmd("git", "status", "--porcelain")
 ```
 
 #### `process.sh(script) -> Cmd`
+
 Run a shell fragment using the platform default shell:
 
 - Unix: `sh -lc <script>`
@@ -397,9 +445,10 @@ Run a shell fragment using the platform default shell:
 local cmd = process.sh("echo $HOME")
 ```
 
-### 6.2 `ProcResult` userdata (result of run/output)
+### 6.2 `CmdResult` userdata (result of run/output)
 
 Fields:
+
 - `result.ok` (boolean)
 - `result.code` (integer)
 - `result.signal` (integer|nil)
@@ -408,6 +457,7 @@ Fields:
 - `result.steps` (table of integers) — per-step exit codes
 
 Methods:
+
 - `result:is_ok() -> boolean`
 - `result:assert_ok(msg?) -> ()` — throws a Lua error if not ok
 
@@ -435,8 +485,8 @@ Builder methods (fluent):
 
 Terminal operations:
 
-- `cmd:run() -> ProcResult` — inherits stdio
-- `cmd:output() -> ProcResult` — captures stdout/stderr
+- `cmd:run() -> CmdResult` — inherits stdio
+- `cmd:output() -> CmdResult` — captures stdout/stderr
 
 Pipeline operator:
 
@@ -459,8 +509,8 @@ Builder methods:
 
 Terminal operations:
 
-- `pl:run() -> ProcResult`
-- `pl:output() -> ProcResult`
+- `pl:run() -> CmdResult`
+- `pl:output() -> CmdResult`
 
 Operator:
 
@@ -502,6 +552,7 @@ local time = require("ward.time")
 ### 7.4 Durations
 
 #### `time.duration(x) -> Duration`
+
 Accepts:
 
 - number: treated as seconds
@@ -574,6 +625,7 @@ All input helpers return an `InputAwaitable` userdata.
 - `term.choose(args) -> InputAwaitable` (returns `string|nil` when awaited)
 
 Awaitable methods:
+
 - `a:wait() -> value`
 - `a() -> value` (via `__call`)
 
@@ -594,6 +646,7 @@ if not ok then return end
 ```
 
 #### `term.password{ prompt, trim? }`
+
 Reads a line with no echo (TTY).
 
 ```lua
@@ -601,6 +654,7 @@ local secret = term.password({ prompt = "Password:" })()
 ```
 
 #### `term.choose{ question, options, default? }`
+
 `options` is an array-like table.
 
 ```lua
@@ -655,9 +709,11 @@ term.println(ansi.bold .. ansi.green .. "OK" .. ansi.reset)
 ```
 
 ### 8.5 `term.progress(args?) -> Progress`
+
 Create a progress renderer for TTY output.
 
 Constructor args (table):
+
 - `total` (integer|nil)
 - `message` (string|nil)
 - `stream` (`"stdout"|"stderr"`, default `"stderr"`)
@@ -826,6 +882,7 @@ assert(fs.is_file(r.path))
 Clones a Git repository into a directory (using the external `git` command), then optionally checks out a revision.
 
 Notes:
+
 - Requires `git` to be installed and discoverable in `PATH`.
 - `git` stdout/stderr are suppressed; use `ok`/`status` to handle errors.
 
@@ -865,6 +922,7 @@ end
 
 print("checked out into", r.path, "bytes", r.size)
 ```
+
 ---
 
 ## 10. `ward.convert` — serialization formats
@@ -902,15 +960,19 @@ local t = require("ward.helpers.table")
 ```
 
 ### 11.1 `helpers.number`
+
 Includes numeric predicates and helpers.
 
 Notable behavior:
+
 - `is_number` treats both Lua integers and floats as numbers.
 
 ### 11.2 `helpers.string`
+
 Includes regex/string helpers, capture utilities, etc.
 
 ### 11.3 `helpers.table`
+
 Includes table utilities.
 
 ---
@@ -934,9 +996,11 @@ local resources = require("ward.host.resources")
 ```
 
 ### 13.1 `host.platform`
+
 Platform inspection helpers (OS, arch, etc.).
 
 ### 13.2 `host.resources`
+
 Resource inspection (memory, CPU) for the host process.
 
 ---
@@ -1001,4 +1065,3 @@ for _ = 1, 5 do
 end
 prog:finish("Done")
 ```
-

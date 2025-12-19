@@ -119,10 +119,6 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // WARN: Rust marks env mutation as unsafe because concurrent access across
-    // threads is UB. With Tokio (threadpool, blocking pool) and libraries
-    // (reqwest, sysinfo, etc.) we cannot reliably guarantee no concurrent env reads.
-    // TODO: Find a better way to make this safe
     env_table.set(
         "set",
         lua.create_function({
@@ -317,31 +313,30 @@ fn probe_path(dir: &Path, name: &str, exts: &[String]) -> Option<String> {
 fn pathext(var: Option<&OsStr>) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("PATHEXT")
-            .map(|exts| {
-                exts.to_string_lossy()
-                    .split(';')
-                    .filter(|ext| !ext.is_empty())
-                    .map(|ext| ext.trim_start_matches('.').to_ascii_uppercase())
-                    .map(|ext| format!(".{ext}"))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v: &Vec<String>| !v.is_empty())
-            .unwrap_or_else(|| {
-                vec![
-                    ".COM".to_string(),
-                    ".EXE".to_string(),
-                    ".BAT".to_string(),
-                    ".CMD".to_string(),
-                    ".VBS".to_string(),
-                    ".VBE".to_string(),
-                    ".JS".to_string(),
-                    ".JSE".to_string(),
-                    ".WSF".to_string(),
-                    ".WSH".to_string(),
-                    ".MSC".to_string(),
-                ]
-            })
+        var.map(|exts| {
+            exts.to_string_lossy()
+                .split(';')
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| ext.trim_start_matches('.').to_ascii_uppercase())
+                .map(|ext| format!(".{ext}"))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                ".COM".to_string(),
+                ".EXE".to_string(),
+                ".BAT".to_string(),
+                ".CMD".to_string(),
+                ".VBS".to_string(),
+                ".VBE".to_string(),
+                ".JS".to_string(),
+                ".JSE".to_string(),
+                ".WSF".to_string(),
+                ".WSH".to_string(),
+                ".MSC".to_string(),
+            ]
+        })
     }
 
     #[cfg(not(target_os = "windows"))]

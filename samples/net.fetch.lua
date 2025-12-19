@@ -6,7 +6,7 @@ local r = fetch.url("https://wttr.in/Tokyo?format=j2", {
     },
     timeout = 60,
     follow_redirects = true,
-    into = "./test-dir",
+    into = "./test-dir/response.json",
     max_bytes = 1024 * 1024 * 2, -- 2MB
 })
 

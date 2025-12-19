@@ -24,9 +24,6 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
         .map_err(crate::Error::from)?;
 
     // Strict instruction limiting: never exceed the configured limit.
-    //
-    // We hook every instruction and decrement by 1. To keep overhead reasonable,
-    // we only run the (slightly heavier) lifecycle tick every TICK_EVERY instructions.
     let remaining = Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit));
     let tick_counter = Arc::new(AtomicU32::new(0));
     {

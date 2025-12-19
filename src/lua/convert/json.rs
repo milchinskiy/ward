@@ -19,10 +19,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     json_table.set(
         "encode_async",
         lua.create_async_function(|lua, (value, opts): (Value, Option<Table>)| async move {
-            // fallible work is inside async -> `?` is allowed
             let (pretty, indent) = parse_options(opts)?;
             let serde_value = lua.from_value::<serde_json::Value>(value)?;
-
             let out = tokio::task::spawn_blocking(move || encode_json_send(serde_value, pretty, indent))
                 .await
                 .map_err(mlua::Error::external)?   // JoinError

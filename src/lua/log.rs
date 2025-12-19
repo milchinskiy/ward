@@ -117,6 +117,7 @@ fn variadic_to_string(args: mlua::Variadic<mlua::Value>) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

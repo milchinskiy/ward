@@ -21,10 +21,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     ini_table.set(
         "encode_async",
         lua.create_async_function(|_, value: Value| async move {
-            // pre-await: Lua -> Rust (no tokio, no threads)
             let doc = value_to_ini_doc(value)?;
-
-            // blocking: Rust -> INI string
             let out = tokio::task::spawn_blocking(move || encode_ini_send(doc))
                 .await
                 .map_err(mlua::Error::external)?   // JoinError
@@ -37,21 +34,17 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     ini_table.set(
         "decode_async",
         lua.create_async_function(|lua, input: String| async move {
-            // blocking: parse INI
-            let doc = tokio::task::spawn_blocking(move || decode_ini_send(input))
+            let doc = tokio::task::spawn_blocking(move || decode_ini(input.as_str()))
                 .await
                 .map_err(mlua::Error::external)?   // JoinError
                 .map_err(mlua::Error::external)?;  // String
 
-            // post-await: Rust -> Lua
             ini_doc_to_lua(&lua, doc)
         })?,
     )?;
 
     Ok(ini_table)
 }
-
-// ---------------- existing sync API (unchanged) ----------------
 
 fn encode(value: Value) -> mlua::Result<String> {
     let doc = value_to_ini_doc(value)?;
@@ -62,8 +55,6 @@ fn decode(lua: &Lua, input: &str) -> mlua::Result<Value> {
     let doc = decode_ini(input).map_err(mlua::Error::external)?;
     ini_doc_to_lua(lua, doc)
 }
-
-// ---------------- conversion helpers ----------------
 
 fn value_to_ini_doc(value: Value) -> mlua::Result<IniDoc> {
     let Value::Table(table) = value else {
@@ -103,8 +94,6 @@ fn ini_doc_to_lua(lua: &Lua, doc: IniDoc) -> mlua::Result<Value> {
     Ok(Value::Table(result))
 }
 
-// ---------------- INI encode/decode (pure Rust) ----------------
-
 // Send-safe worker for spawn_blocking
 fn encode_ini_send(doc: IniDoc) -> Result<String, String> {
     Ok(encode_ini(doc))
@@ -126,11 +115,6 @@ fn encode_ini(doc: IniDoc) -> String {
     }
 
     ini.writes()
-}
-
-// Send-safe worker for spawn_blocking
-fn decode_ini_send(input: String) -> Result<IniDoc, String> {
-    decode_ini(&input)
 }
 
 fn decode_ini(input: &str) -> Result<IniDoc, String> {

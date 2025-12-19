@@ -416,9 +416,10 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
     {
         if let Ok(meta) = tokio::fs::symlink_metadata(&target).await
             && meta.is_dir()
+            && let Some(mode) = options.mode
         {
-            let perms = std::fs::Permissions::from_mode(options.mode);
-            let _ = tokio::fs::set_permissions(&target, perms).await;
+            let perms = std::fs::Permissions::from_mode(mode);
+            tokio::fs::set_permissions(&target, perms).await.ok();
         }
     }
 
@@ -950,21 +951,21 @@ fn value_to_bytes(value: mlua::Value) -> mlua::Result<Vec<u8>> {
 #[derive(Default)]
 struct MkdirOpts {
     recursive: bool,
-    mode: u32,
+    mode: Option<u32>,
     force: bool,
 }
 impl MkdirOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
-                recursive: table.get("recursive").unwrap_or(false),
-                mode: table.get("mode").unwrap_or(0o644),
-                force: table.get("force").unwrap_or(false),
+                recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
+                mode: table.get::<Option<u32>>("mode")?,
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self {
                 recursive: false,
-                mode: 0o644,
+                mode: Some(0o755),
                 force: false,
             })
         }
@@ -980,8 +981,8 @@ impl RemoveOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
-                recursive: table.get("recursive").unwrap_or(false),
-                force: table.get("force").unwrap_or(false),
+                recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self::default())
@@ -998,8 +999,8 @@ impl RecursiveForce {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
-                recursive: table.get("recursive").unwrap_or(false),
-                force: table.get("force").unwrap_or(false),
+                recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self::default())
@@ -1015,7 +1016,7 @@ impl ForceOnly {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
-                force: table.get("force").unwrap_or(false),
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self { force: false })
@@ -1032,8 +1033,8 @@ impl TouchOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
-                recursive: table.get("recursive").unwrap_or(false),
-                force: table.get("force").unwrap_or(false),
+                recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self::default())
@@ -1054,7 +1055,7 @@ enum ReadMode {
 impl ReadOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
-            let mode: Option<String> = table.get("mode").unwrap_or(None);
+            let mode: Option<String> = table.get::<Option<String>>("mode").unwrap_or(None);
             let mode = match mode.as_deref() {
                 Some("binary") => ReadMode::Binary,
                 _ => ReadMode::Text,
@@ -1084,8 +1085,8 @@ impl WriteOpts {
         if let mlua::Value::Table(table) = value {
             let mut opts = Self {
                 mode: WriteMode::Overwrite,
-                binary: table.get("binary").unwrap_or(false),
-                force: table.get("force").unwrap_or(false),
+                binary: table.get::<Option<bool>>("binary")?.unwrap_or(false),
+                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             };
 
             if let Ok(append) = table.get::<bool>("append")
@@ -1139,13 +1140,17 @@ struct ListOpts {
 impl ListOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
-            let regex_string: Option<String> = table.get("regex").unwrap_or(None);
-            let regex = regex_string.and_then(|s| regex::Regex::new(&s).ok());
+            let regex_string: Option<String> = table.get::<Option<String>>("regex")?;
+            let regex = if let Some(regex_string) = regex_string {
+                Some(regex::Regex::new(&regex_string).map_err(mlua::Error::external)?)
+            } else {
+                None
+            };
             Ok(Self {
-                dirs: table.get("dirs").unwrap_or(false),
-                files: table.get("files").unwrap_or(false),
-                recursive: table.get("recursive").unwrap_or(false),
-                depth: table.get("depth").unwrap_or(0),
+                dirs: table.get::<Option<bool>>("dirs")?.unwrap_or(false),
+                files: table.get::<Option<bool>>("files")?.unwrap_or(false),
+                recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
+                depth: table.get::<Option<usize>>("depth")?.unwrap_or(0),
                 regex,
             })
         } else {

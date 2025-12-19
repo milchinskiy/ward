@@ -1,15 +1,16 @@
+pub mod console;
 pub mod convert;
 pub mod env;
 pub mod fs;
 pub mod helpers;
-pub mod net;
-pub mod io;
-pub mod process;
-pub mod log;
 pub mod host;
+pub mod io;
 pub mod lifecycle;
-pub mod time;
+pub mod log;
+pub mod net;
+pub mod process;
 pub mod term;
+pub mod time;
 
 #[allow(unused)]
 fn require(
@@ -29,6 +30,7 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("convert".to_string(), convert::define(lua)?),
         ("env".to_string(), env::define(lua)?),
         ("fs".to_string(), fs::define(lua)?),
+        ("host".to_string(), host::define(lua)?),
         ("helpers".to_string(), helpers::define(lua)?),
         ("io".to_string(), io::define(lua)?),
         ("lifecycle".to_string(), lifecycle::define(lua)?),

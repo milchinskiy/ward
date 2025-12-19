@@ -2,14 +2,8 @@
 
 use mlua::{Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods, Value};
 use std::io::{self, IsTerminal, Write};
-use std::sync::OnceLock;
-use tokio::sync::Mutex as AsyncMutex;
-
-static INPUT_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
-
-fn input_lock() -> &'static AsyncMutex<()> {
-    INPUT_LOCK.get_or_init(|| AsyncMutex::new(()))
-}
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 /// Module init
 /// # Errors [`mlua::Error`]
@@ -137,20 +131,25 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     Ok(term)
 }
 
-// --- Argument parsing helpers ------------------------------------------------
-
 fn parse_prompt_args(lua: &Lua, mut mv: MultiValue) -> mlua::Result<PromptArgs> {
     if mv.is_empty() {
         return Err(mlua::Error::external("prompt expects arguments"));
     }
 
     if mv.len() == 1 {
-        return <PromptArgs as mlua::FromLua>::from_lua(mv.pop_front().unwrap(), lua);
+        let Some(q) = mv.pop_front() else {
+            return Err(mlua::Error::external("Error parsing prompt"));
+        };
+        return <PromptArgs as mlua::FromLua>::from_lua(q, lua);
     }
 
     // (string, table)
-    let q = mv.pop_front().unwrap();
-    let opts = mv.pop_front().unwrap();
+    let Some(q) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
+    let Some(opts) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
 
     let Value::String(qs) = q else {
         return Err(mlua::Error::external("prompt first arg must be string"));
@@ -174,11 +173,18 @@ fn parse_confirm_args(lua: &Lua, mut mv: MultiValue) -> mlua::Result<ConfirmArgs
     }
 
     if mv.len() == 1 {
-        return <ConfirmArgs as mlua::FromLua>::from_lua(mv.pop_front().unwrap(), lua);
+        let Some(q) = mv.pop_front() else {
+            return Err(mlua::Error::external("Error parsing prompt"));
+        };
+        return <ConfirmArgs as mlua::FromLua>::from_lua(q, lua);
     }
 
-    let q = mv.pop_front().unwrap();
-    let opts = mv.pop_front().unwrap();
+    let Some(q) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
+    let Some(opts) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
 
     let Value::String(qs) = q else {
         return Err(mlua::Error::external("confirm first arg must be string"));
@@ -201,11 +207,18 @@ fn parse_password_args(lua: &Lua, mut mv: MultiValue) -> mlua::Result<PasswordAr
     }
 
     if mv.len() == 1 {
-        return <PasswordArgs as mlua::FromLua>::from_lua(mv.pop_front().unwrap(), lua);
+        let Some(q) = mv.pop_front() else {
+            return Err(mlua::Error::external("Error parsing prompt"));
+        };
+        return <PasswordArgs as mlua::FromLua>::from_lua(q, lua);
     }
 
-    let p = mv.pop_front().unwrap();
-    let opts = mv.pop_front().unwrap();
+    let Some(p) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
+    let Some(opts) = mv.pop_front() else {
+        return Err(mlua::Error::external("Error parsing prompt"));
+    };
 
     let Value::String(ps) = p else {
         return Err(mlua::Error::external("password first arg must be string"));
@@ -221,8 +234,6 @@ fn parse_password_args(lua: &Lua, mut mv: MultiValue) -> mlua::Result<PasswordAr
         trim: t.get::<Option<bool>>("trim")?.unwrap_or(false),
     })
 }
-
-// --- Public argument types (Lua-friendly) -------------------------------------
 
 /// term.prompt(question [, opts])
 ///
@@ -355,8 +366,6 @@ impl mlua::FromLua for ChooseArgs {
     }
 }
 
-// --- Awaitable implementation -------------------------------------------------
-
 #[derive(Clone, Debug)]
 enum InputKind {
     Prompt(PromptArgs),
@@ -368,35 +377,30 @@ enum InputKind {
 #[derive(Clone, Debug)]
 struct InputAwaitable {
     kind: InputKind,
-    consumed: bool,
 }
 
 impl InputAwaitable {
     fn prompt(args: PromptArgs) -> Self {
         Self {
             kind: InputKind::Prompt(args),
-            consumed: false,
         }
     }
 
     fn confirm(args: ConfirmArgs) -> Self {
         Self {
             kind: InputKind::Confirm(args),
-            consumed: false,
         }
     }
 
     fn password(args: PasswordArgs) -> Self {
         Self {
             kind: InputKind::Password(args),
-            consumed: false,
         }
     }
 
     fn choose(args: ChooseArgs) -> Self {
         Self {
             kind: InputKind::Choose(args),
-            consumed: false,
         }
     }
 }
@@ -404,12 +408,11 @@ impl InputAwaitable {
 impl UserData for InputAwaitable {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // wait() -> value
-        methods.add_async_method_mut("wait", |lua, mut this, ()| async move { input_wait(&lua, &mut this).await });
+        methods.add_async_method_mut("wait", |lua, this, ()| async move { input_wait(&lua, &this).await });
 
         // __call() -> value
-        methods.add_async_meta_method_mut(MetaMethod::Call, |lua, mut this, ()| async move {
-            input_wait(&lua, &mut this).await
-        });
+        methods
+            .add_async_meta_method_mut(MetaMethod::Call, |lua, this, ()| async move { input_wait(&lua, &this).await });
 
         methods.add_meta_method(MetaMethod::ToString, |_, _, ()| Ok("InputAwaitable".to_string()));
     }
@@ -421,29 +424,18 @@ enum InputResult {
     OptStr(Option<String>),
 }
 
-async fn input_wait(lua: &Lua, this: &mut InputAwaitable) -> mlua::Result<MultiValue> {
-    if this.consumed {
-        return Err(mlua::Error::external("input awaitable already consumed (create a new one)"));
-    }
-    this.consumed = true;
+async fn input_wait(lua: &Lua, this: &InputAwaitable) -> mlua::Result<MultiValue> {
+    let console = super::console::console(lua);
+    let _guard = console.interactive.lock().await;
 
-    // NOTE: Serialize interactive input. Without this, concurrent :wait() calls can interleave
-    // reads on stdin and corrupt prompts.
-    let _guard = input_lock().lock().await;
+    let res: InputResult = match this.kind.clone() {
+        InputKind::Prompt(args) => InputResult::OptStr(prompt_async(&console, &args).await?),
+        InputKind::Confirm(args) => InputResult::Bool(confirm_async(&console, &args).await?),
+        InputKind::Choose(args) => InputResult::OptStr(choose_async(&console, &args).await?),
+        InputKind::Password(args) => InputResult::OptStr(password_async(&console, &args).await?),
+    };
 
-    // Move data into blocking closure
-    let kind = this.kind.clone();
-
-    let res: mlua::Result<InputResult> = tokio::task::spawn_blocking(move || match kind {
-        InputKind::Prompt(args) => prompt_blocking(&args).map(InputResult::OptStr),
-        InputKind::Confirm(args) => confirm_blocking(&args).map(InputResult::Bool),
-        InputKind::Password(args) => password_blocking(&args).map(InputResult::OptStr),
-        InputKind::Choose(args) => choose_blocking(&args).map(InputResult::OptStr),
-    })
-    .await
-    .map_err(|e| mlua::Error::external(format!("input task join error: {e}")))?;
-
-    match res? {
+    match res {
         InputResult::Bool(b) => {
             let mut mv = MultiValue::new();
             mv.push_back(Value::Boolean(b));
@@ -460,23 +452,29 @@ async fn input_wait(lua: &Lua, this: &mut InputAwaitable) -> mlua::Result<MultiV
     }
 }
 
-// --- Blocking IO primitives ---------------------------------------------------
+async fn stdout_write(console: &Arc<crate::lua::console::Console>, s: &str) -> mlua::Result<()> {
+    let mut out = console.stdout.lock().await;
+    out.write_all(s.as_bytes()).await.map_err(mlua::Error::external)?;
+    out.flush().await.map_err(mlua::Error::external)?;
+    drop(out);
+    Ok(())
+}
 
-fn prompt_blocking(args: &PromptArgs) -> mlua::Result<Option<String>> {
+async fn prompt_async(console: &Arc<crate::lua::console::Console>, args: &PromptArgs) -> mlua::Result<Option<String>> {
     let q = args.question.as_str();
-
-    if let Some(def) = &args.default {
-        print!("{q} [{def}] ");
-    } else {
-        print!("{q} ");
-    }
-    io::stdout().flush().ok();
+    let prompt = args
+        .default
+        .as_ref()
+        .map_or_else(|| format!("{q} "), |def| format!("{q} [{def}] "));
+    stdout_write(console, &prompt).await?;
 
     let mut buf = String::new();
-    let n = io::stdin().read_line(&mut buf).map_err(mlua::Error::external)?;
+    let bytes = {
+        let mut stdin = console.stdin.lock().await;
+        stdin.read_line(&mut buf).await.map_err(mlua::Error::external)?
+    };
 
-    if n == 0 {
-        // EOF
+    if bytes == 0 {
         return Ok(None);
     }
 
@@ -494,50 +492,53 @@ fn prompt_blocking(args: &PromptArgs) -> mlua::Result<Option<String>> {
     }
 }
 
-fn confirm_blocking(args: &ConfirmArgs) -> mlua::Result<bool> {
+async fn confirm_async(console: &Arc<crate::lua::console::Console>, args: &ConfirmArgs) -> mlua::Result<bool> {
     let suffix = match args.default {
         Some(true) => "[Y/n]",
         Some(false) | None => "[y/N]",
     };
 
-    print!("{} {} ", args.question, suffix);
-    io::stdout().flush().ok();
-
+    stdout_write(console, &format!("{} {} ", args.question, suffix)).await?;
     let mut buf = String::new();
-    let n = io::stdin().read_line(&mut buf).map_err(mlua::Error::external)?;
-
-    if n == 0 {
-        // EOF => treat as default or false
+    let bytes = {
+        let mut stdin = console.stdin.lock().await;
+        stdin.read_line(&mut buf).await.map_err(mlua::Error::external)?
+    };
+    if bytes == 0 {
         return Ok(args.default.unwrap_or(false));
     }
-
     let s = buf.trim().to_ascii_lowercase();
     if s.is_empty() {
         return Ok(args.default.unwrap_or(false));
     }
 
-    // Accept [Yy](es)? | *
     Ok(s == "y" || s == "yes")
 }
 
-fn choose_blocking(args: &ChooseArgs) -> mlua::Result<Option<String>> {
-    println!("{}", args.question);
+async fn choose_async(console: &Arc<crate::lua::console::Console>, args: &ChooseArgs) -> mlua::Result<Option<String>> {
+    let mut menu = String::new();
+    menu.push_str(&args.question);
+    menu.push('\n');
     for (i, c) in args.choices.iter().enumerate() {
-        println!("  {}) {}", i + 1, c);
+        let s = format!("  {}) {}\n", i + 1, c);
+        menu.push_str(s.as_str());
     }
-
+    stdout_write(console, &menu).await?;
     let prompt = args.default_index.map_or_else(
         || format!("Select 1-{}: ", args.choices.len()),
         |d| format!("Select 1-{} [default {}]: ", args.choices.len(), d),
     );
 
     loop {
-        print!("{prompt}");
-        io::stdout().flush().ok();
+        stdout_write(console, &prompt).await?;
 
         let mut buf = String::new();
-        let n = io::stdin().read_line(&mut buf).map_err(mlua::Error::external)?;
-        if n == 0 {
+        let bytes = {
+            let mut stdin = console.stdin.lock().await;
+            stdin.read_line(&mut buf).await.map_err(mlua::Error::external)?
+        };
+
+        if bytes == 0 {
             return Ok(None);
         }
 
@@ -555,36 +556,35 @@ fn choose_blocking(args: &ChooseArgs) -> mlua::Result<Option<String>> {
         {
             return Ok(Some(args.choices[i - 1].clone()));
         }
-
-        // reprompt
     }
 }
 
-fn password_blocking(args: &PasswordArgs) -> mlua::Result<Option<String>> {
-    // Print prompt and read from the controlling tty with echo disabled.
-    // (rpassword will fall back to stdin where appropriate.)
-    print!("{} ", args.prompt);
-    io::stdout().flush().ok();
+async fn password_async(
+    console: &Arc<crate::lua::console::Console>,
+    args: &PasswordArgs,
+) -> mlua::Result<Option<String>> {
+    stdout_write(console, &format!("{} ", args.prompt)).await?;
+    let res = tokio::task::spawn_blocking(rpassword::read_password)
+        .await
+        .map_err(|e| mlua::Error::external(format!("password task join error: {e}")))?;
 
-    let s = match rpassword::read_password() {
-        Ok(s) => s,
-        Err(e) => {
-            // Treat EOF as nil for scripting ergonomics.
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return Ok(None);
+    match res {
+        Ok(s) => {
+            if args.trim {
+                Ok(Some(s.trim_end_matches(['\r', '\n']).to_string()))
+            } else {
+                Ok(Some(s))
             }
-            return Err(mlua::Error::external(e));
         }
-    };
-
-    if args.trim {
-        Ok(Some(s.trim_end_matches(['\r', '\n']).to_string()))
-    } else {
-        Ok(Some(s))
+        Err(e) => {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                Ok(None)
+            } else {
+                Err(mlua::Error::external(e))
+            }
+        }
     }
 }
-
-// --- Printing helpers ---------------------------------------------------------
 
 fn write_value(newline: bool, v: Value) -> mlua::Result<()> {
     let s = match v {
@@ -729,7 +729,10 @@ fn parse_progress_args(mut mv: MultiValue) -> mlua::Result<ProgressArgs> {
     }
 
     if mv.len() == 1 {
-        match mv.pop_front().unwrap() {
+        let Some(q) = mv.pop_front() else {
+            return Err(mlua::Error::external("Error parsing prompt"));
+        };
+        match q {
             Value::Integer(i) => {
                 let total = u64::try_from(i.max(0)).map_err(mlua::Error::external)?;
                 return Ok(ProgressArgs {

@@ -81,7 +81,7 @@ impl Pipeline {
 }
 
 #[derive(Clone)]
-struct ProcResult {
+struct CmdResult {
     ok: bool,
     code: i64,
     signal: Option<i64>,
@@ -91,7 +91,7 @@ struct ProcResult {
     steps: Vec<i64>,
 }
 
-impl UserData for ProcResult {
+impl UserData for CmdResult {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("ok", |_, this| Ok(this.ok));
         fields.add_field_method_get("code", |_, this| Ok(this.code));
@@ -334,24 +334,25 @@ async fn pump_to_shared_stdin<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     }
 }
 
-async fn feed_first_stdin(child: &mut Child, stdin: StdinSpec) {
+async fn feed_first_stdin(child: &mut Child, stdin: StdinSpec) -> mlua::Result<()> {
     let Some(mut w) = child.stdin.take() else {
-        return;
+        return Ok(());
     };
 
     match stdin {
         StdinSpec::Inherit => {}
         StdinSpec::Bytes(b) => {
-            let _ = w.write_all(&b).await;
+            w.write_all(&b).await?;
         }
         StdinSpec::File(path) => {
             if let Ok(mut f) = fs::File::open(path).await {
-                let _ = io::copy(&mut f, &mut w).await;
+                io::copy(&mut f, &mut w).await?;
             }
         }
     }
     // close stdin
     drop(w);
+    Ok(())
 }
 
 fn apply_common_opts(cmd: &mut Command, spec: &CmdSpec) {
@@ -369,7 +370,7 @@ async fn run_pipeline(
     pipefail: bool,
     mode: RunMode,
     overlay: HashMap<String, Option<String>>,
-) -> LuaResult<ProcResult> {
+) -> LuaResult<CmdResult> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
     }
@@ -467,7 +468,7 @@ async fn run_pipeline(
     }
 
     // Feed stdin of first command if configured (bytes/file).
-    feed_first_stdin(&mut children[0], specs[0].stdin.clone()).await;
+    feed_first_stdin(&mut children[0], specs[0].stdin.clone()).await?;
 
     // Capture last stdout/stderr if required.
     let mut last_stdout_task = None;
@@ -563,7 +564,7 @@ async fn run_pipeline(
                 let _ = t.await;
             }
 
-            return Ok(ProcResult {
+            return Ok(CmdResult {
                 ok: false,
                 code: 124,
                 signal: None,
@@ -612,7 +613,7 @@ async fn run_pipeline(
         code == 0
     };
 
-    Ok(ProcResult {
+    Ok(CmdResult {
         ok,
         code,
         signal,

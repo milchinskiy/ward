@@ -2,7 +2,7 @@ pub mod number;
 pub mod string;
 pub mod table;
 
-/// Initializes the `type` module
+/// Initializes the `helpers` module
 /// # Errors [`mlua::Error`]
 pub fn define(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
