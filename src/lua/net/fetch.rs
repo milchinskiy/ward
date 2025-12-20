@@ -68,6 +68,7 @@ pub struct UrlOptions {
     pub headers: Vec<(String, String)>,
     pub timeout: Option<Duration>,
     pub follow_redirects: bool,
+    pub insecure: bool,
     pub into: Option<PathBuf>,
     pub max_bytes: Option<u64>,
 }
@@ -80,6 +81,7 @@ impl UrlOptions {
             return Ok(Self {
                 method: "GET".to_string(),
                 follow_redirects: true,
+                insecure: false,
                 ..Self::default()
             });
         };
@@ -89,6 +91,7 @@ impl UrlOptions {
                 .get::<Option<String>>("method")?
                 .unwrap_or_else(|| "GET".to_string()),
             follow_redirects: table.get::<Option<bool>>("follow_redirects")?.unwrap_or(true),
+            insecure: table.get::<Option<bool>>("insecure")?.unwrap_or(false),
             ..Self::default()
         };
 
@@ -179,12 +182,17 @@ impl GitOptions {
     }
 }
 
-async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> {
+/// Fetches a url
+/// # Errors [`mlua::Error`]
+pub(crate) async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> {
     let options = UrlOptions::from_value(opts)?;
 
     let mut client_builder = reqwest::Client::builder();
     if let Some(timeout) = options.timeout {
         client_builder = client_builder.timeout(timeout);
+    }
+    if options.insecure {
+        client_builder = client_builder.danger_accept_invalid_certs(true);
     }
     client_builder = if options.follow_redirects {
         client_builder.redirect(redirect::Policy::limited(10))
@@ -258,10 +266,12 @@ async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> 
     Ok(response)
 }
 
-async fn fetch_git_async(
+/// Fetches a git repo
+/// # Errors [`mlua::Error`]
+pub(crate) async fn fetch_git_async(
     url: &str,
     opts: Value,
-    overlay: HashMap<String, Option<String>>,
+    overlay: HashMap<String, Option<String>, std::hash::RandomState>,
 ) -> mlua::Result<FetchResponse> {
     let options = GitOptions::from_value(opts)?;
     let target = options.into.clone().unwrap_or_else(|| unique_path("fetch-git"));

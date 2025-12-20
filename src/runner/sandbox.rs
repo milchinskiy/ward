@@ -10,8 +10,8 @@ pub struct SandboxPolicy {
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
-            memory_limit_bytes: 10_000_000,
-            instruction_limit: 100_000_000,
+            memory_limit_bytes: usize::MAX,
+            instruction_limit: u64::MAX,
             thread_pool_size: 2,
             timeout: None,
         }

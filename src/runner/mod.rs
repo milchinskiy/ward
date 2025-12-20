@@ -86,7 +86,7 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         .set_environment(env)
         .exec_async();
 
-    // Important: the VM instruction hook does not execute while awaiting Rust async operations.
+    // NOTE: the VM instruction hook does not execute while awaiting Rust async operations.
     // Handle Ctrl-C here so scripts can be interrupted even when blocked on I/O.
     let exec_res: crate::Result = tokio::select! {
         res = async {
@@ -141,6 +141,9 @@ fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
         exposed_modules.set(name, module)?;
     }
     lua.register_module("ward", exposed_modules)?;
+
+    // Enable `require("externals.<name>")` by installing a dedicated searcher.
+    crate::lua::module::install_externals_searcher(lua)?;
 
     Ok(())
 }
