@@ -17,12 +17,15 @@ Ward is a Lua runtime designed for writing scripts that feel like bash/sh, but w
 You can import either the root module or submodules:
 
 ```lua
-local ward = require("ward")
-local fs   = require("ward.fs")
-local io   = require("ward.io")
-local proc = require("ward.process")
-local time = require("ward.time")
-local term = require("ward.term")
+local ward   = require("ward")
+local fs     = require("ward.fs")
+local path   = require("ward.fs.path")
+local io     = require("ward.io")
+local proc   = require("ward.process")
+local crypto = require("ward.crypto")
+local retry  = require("ward.helpers.retry")
+local time   = require("ward.time")
+local term   = require("ward.term")
 ```
 
 ### 1.2 Async in Ward: two styles
@@ -64,7 +67,7 @@ end
 
 - `nil|string` means the function returns either `nil` or a Lua string.
 - “bytes string” means a Lua string whose contents are raw bytes (binary-safe).
-- Paths are typically accepted as strings.
+- Paths are typically accepted as strings (and in most ward.fs APIs also as ward.fs.path objects).
 - Most option tables are optional; when omitted, defaults apply.
 
 ---
@@ -200,6 +203,46 @@ Example:
 local p = fs.join("build", "out", "app.bin")
 print(fs.dirname(p))
 print(fs.basename(p))
+```
+
+#### 4.2.1 `fs.path` — pure path manipulation (Path userdata)
+
+`fs.path` provides a `Path` userdata type for manipulating paths **without** touching the filesystem.
+It is useful for building paths safely and passing them to `ward.fs` APIs.
+
+Constructors:
+
+- `fs.path.new(path) -> Path`
+- `fs.path.cwd() -> Path`
+- `fs.path.join(a, b) -> Path` (both arguments may be strings or `Path`)
+
+Methods on `Path`:
+
+- `Path:is_abs() -> boolean`
+- `Path:normalize() -> Path`
+- `Path:parts() -> table` (array-like, path components)
+- `Path:split() -> (dirname: string, basename: string)`
+- `Path:join(segment) -> Path`
+- `Path:dirname() -> string`
+- `Path:basename() -> string`
+- `Path:extname() -> nil|string`
+- `Path:stem() -> nil|string`
+- `Path:as_string() -> string`
+
+Interoperability:
+
+Most `ward.fs` functions accept either a path string **or** a `fs.path` object.
+
+Example:
+
+```lua
+local fs = require("ward.fs")
+local path = require("ward.fs.path")
+
+local p = path.new("build/../out/app.bin"):normalize()
+assert(fs.mkdir(p:dirname(), { recursive = true, force = true }))
+fs.write(p, "hello\n")
+print("wrote:", tostring(p))
 ```
 
 ### 4.3 Directory listing and globbing
@@ -954,6 +997,7 @@ local t = json.decode(s)
 
 ```lua
 local helpers = require("ward.helpers")
+local retry   = require("ward.helpers.retry")
 local n = require("ward.helpers.number")
 local s = require("ward.helpers.string")
 local t = require("ward.helpers.table")
@@ -975,19 +1019,85 @@ Includes regex/string helpers, capture utilities, etc.
 
 Includes table utilities.
 
+### 11.4 `helpers.retry`
+
+helpers.retry implements an async retry loop for functions that may intermittently fail.
+
+#### `retry.run(fn, opts?) -> any`
+
+Calls fn() and returns its result. If fn() errors, Ward retries until success or the attempt limit is reached.
+
+Options (opts table):
+
+- attempts (integer, default 3) — total attempts (minimum 1)
+- delay_ms (integer, default 100) — base delay between retries
+- backoff (number, default 2.0) — multiplier applied to the delay after each failed attempt (minimum 1.0)
+- max_delay_ms (integer|nil) — optional cap on the delay
+- jitter (boolean, default false) — randomize delay to reduce thundering herd
+- jitter_ratio (number, default 0.2) — maximum relative jitter, clamped to 0..1
+
+Example:
+
+```lua
+local retry = require("ward.helpers.retry")
+local net = require("ward.net.http")
+
+local res = retry.run(function()
+    ...
+end, { attempts = 5, delay_ms = 200, backoff = 2.0, jitter = true })
+
++print("ok:", res.status)
+```
+
 ---
 
-## 12. `ward.log` — logging
+## 12. `ward.crypto` — hashing and checksums
+
+```lua
+local crypto = require("ward.crypto")
+```
+
+Byte-string functions (Lua strings are binary-safe):
+
+- `crypto.sha256(bytes) -> string` (hex)
+- `crypto.sha1(bytes) -> string` (hex)
+- `crypto.md5(bytes) -> string` (hex)
+
+File functions (async, streamed):
+
+- `crypto.sha256_file(path) -> string` (hex)
+- `crypto.sha1_file(path) -> string` (hex)
+- `crypto.md5_file(path) -> string` (hex)
+
+Examples:
+
+```lua
+local crypto = require("ward.crypto")
+
+local digest = crypto.sha256("abc")
+print("sha256(abc) =", digest)
+
+local file_digest = crypto.sha256_file("Cargo.toml")
+print("sha256(Cargo.toml) =", file_digest)
+```
+
+## 13. `ward.log` — logging
 
 ```lua
 local log = require("ward.log")
+log.info("hello", "world")
+log.trace(...)
+log.debug(...)
+log.warn(...)
+log.error(...)
+log.fatal(...)
 ```
 
 Ward log is intentionally minimal; use it for script-friendly logs.
 
 ---
 
-## 13. `ward.host` — platform and host resources
+## 14. `ward.host` — platform and host resources
 
 ```lua
 local host = require("ward.host")
@@ -995,17 +1105,17 @@ local platform = require("ward.host.platform")
 local resources = require("ward.host.resources")
 ```
 
-### 13.1 `host.platform`
+### 14.1 `host.platform`
 
 Platform inspection helpers (OS, arch, etc.).
 
-### 13.2 `host.resources`
+### 14.2 `host.resources`
 
 Resource inspection (memory, CPU) for the host process.
 
 ---
 
-## 14. `ward.lifecycle` — shutdown hooks and signals
+## 15. `ward.lifecycle` — shutdown hooks and signals
 
 ```lua
 local lifecycle = require("ward.lifecycle")
@@ -1028,9 +1138,9 @@ end)
 
 ---
 
-## 15. Examples (shell replacement style)
+## 16. Examples (shell replacement style)
 
-### 15.1 "set -e" style: assert on failures
+### 16.1 "set -e" style: assert on failures
 
 ```lua
 local process = require("ward.process")
@@ -1040,7 +1150,7 @@ process.cmd("git", "rev-parse", "--is-inside-work-tree")
   :assert_ok("not a git repo")
 ```
 
-### 15.2 Download to temp dir and process
+### 16.2 Download to temp dir and process
 
 ```lua
 local fs = require("ward.fs")

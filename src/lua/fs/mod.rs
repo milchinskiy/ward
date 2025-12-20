@@ -12,6 +12,8 @@ use glob::glob;
 use mlua::{Lua, Table, Value};
 use tokio::io::AsyncWriteExt;
 
+pub mod path;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -31,6 +33,13 @@ use std::os::windows::fs::symlink_file as symlink;
 /// # Errors [`mlua::Error`]
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
     let fs_table = lua.create_table()?;
+
+    // Pure path manipulation helpers (no filesystem access)
+    {
+        let path_mod = path::define(lua)?;
+        fs_table.set("path", path_mod.clone())?;
+        lua.register_module("ward.fs.path", path_mod)?;
+    }
 
     fs_table.set(
         "is_exists",
@@ -928,6 +937,13 @@ fn should_include(path: &Path, is_dir: bool, opts: &ListOpts) -> bool {
 fn value_to_path_buf(value: Value) -> mlua::Result<PathBuf> {
     match value {
         Value::String(s) => Ok(PathBuf::from(s.to_str()?.to_owned())),
+        Value::UserData(u) => {
+            if let Ok(p) = u.borrow::<path::PathObj>() {
+                Ok(p.path.clone())
+            } else {
+                Err(mlua::Error::external("expected path or string"))
+            }
+        }
         other => Err(mlua::Error::external(format!("expected path or string, got {other:?}"))),
     }
 }

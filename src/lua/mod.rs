@@ -1,5 +1,6 @@
 pub mod console;
 pub mod convert;
+pub mod crypto;
 pub mod env;
 pub mod fs;
 pub mod helpers;
@@ -28,6 +29,7 @@ fn require(
 pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
     Ok(vec![
         ("convert".to_string(), convert::define(lua)?),
+        ("crypto".to_string(), crypto::define(lua)?),
         ("env".to_string(), env::define(lua)?),
         ("fs".to_string(), fs::define(lua)?),
         ("host".to_string(), host::define(lua)?),
