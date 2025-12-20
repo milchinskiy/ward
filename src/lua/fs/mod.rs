@@ -450,12 +450,20 @@ async fn rm_async(path: &Path, options: RemoveOpts) -> mlua::Result<bool> {
         tokio::fs::remove_file(&target).await
     };
 
-    Ok(res.is_ok() || options.force)
+    match res {
+        Ok(()) => Ok(true),
+        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Ok(false),
+    }
 }
 
 async fn unlink_async(path: &Path, options: ForceOnly) -> mlua::Result<bool> {
     let res = tokio::fs::remove_file(path).await;
-    Ok(res.is_ok() || options.force)
+    match res {
+        Ok(()) => Ok(true),
+        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Ok(false),
+    }
 }
 
 async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::Result<bool> {
@@ -529,7 +537,7 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::R
         }
     }
 
-    Ok(success || options.force)
+    Ok(success)
 }
 
 async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -> mlua::Result<bool> {
@@ -597,7 +605,7 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
     #[cfg(not(unix))]
     let _ = (path, uid, gid);
 
-    Ok(success || options.force)
+    Ok(success)
 }
 
 async fn maybe_force_remove(dest: &Path) {
@@ -621,14 +629,14 @@ async fn rename_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> m
     if options.force && exists_async(new_path).await {
         maybe_force_remove(new_path).await;
     }
-    Ok(tokio::fs::rename(old_path, new_path).await.is_ok() || options.force)
+    Ok(tokio::fs::rename(old_path, new_path).await.is_ok())
 }
 
 async fn link_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> mlua::Result<bool> {
     if options.force && exists_async(new_path).await {
         maybe_force_remove(new_path).await;
     }
-    Ok(tokio::fs::hard_link(old_path, new_path).await.is_ok() || options.force)
+    Ok(tokio::fs::hard_link(old_path, new_path).await.is_ok())
 }
 
 async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> mlua::Result<bool> {
@@ -641,8 +649,7 @@ async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly
 
     #[cfg(any(unix, target_os = "windows"))]
     {
-        let force = options.force;
-        let ok = tokio::task::spawn_blocking(move || symlink(source, dest).is_ok() || force)
+        let ok = tokio::task::spawn_blocking(move || symlink(source, dest).is_ok())
             .await
             .map_err(mlua::Error::external)?;
         Ok(ok)
@@ -705,10 +712,9 @@ async fn touch_async(path: &Path, options: TouchOpts) -> mlua::Result<bool> {
     }
 
     // filetime is sync; run in blocking pool
-    let force = options.force;
     let ok = tokio::task::spawn_blocking(move || {
         let now = FileTime::from_system_time(SystemTime::now());
-        filetime::set_file_times(&target, now, now).is_ok() || force
+        filetime::set_file_times(&target, now, now).is_ok()
     })
     .await
     .map_err(mlua::Error::external)?;
@@ -847,7 +853,7 @@ async fn copy_async(from: &Path, to: &Path, options: ForceOnly) -> mlua::Result<
     if options.force && exists_async(to).await {
         maybe_force_remove(to).await;
     }
-    Ok(tokio::fs::copy(from, to).await.is_ok() || options.force)
+    Ok(tokio::fs::copy(from, to).await.is_ok())
 }
 
 fn join(path: PathBuf, rest: mlua::Variadic<Value>) -> mlua::Result<String> {

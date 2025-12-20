@@ -281,6 +281,18 @@ pub fn shutdown_requested(lua: &Lua) -> bool {
     get_mgr(lua).is_some_and(|m| m.requested())
 }
 
+/// Request shutdown from Rust code (used by the runner for immediate Ctrl-C handling).
+/// Safe to call even if lifecycle has not been initialized.
+/// # Errors [`mlua::Error`]
+pub fn request_shutdown(lua: &Lua, code: Option<i32>) -> mlua::Result<()> {
+    let Some(mgr) = get_mgr(lua) else {
+        return Ok(());
+    };
+    mgr.ensure_started();
+    mgr.request_shutdown(code);
+    Ok(())
+}
+
 /// Run shutdown callbacks once (safe to call multiple times).
 /// `error` is optional string context (e.g. script error message).
 /// # Errors [`mlua::Error`]

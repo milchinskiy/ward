@@ -86,14 +86,24 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         .set_environment(env)
         .exec_async();
 
-    // Run the chunk, but always run shutdown callbacks before returning.
-    let exec_res: crate::Result = if let Some(timeout) = policy.timeout {
-        match tokio::time::timeout(timeout, evaluator).await {
-            Ok(res) => res.map_err(crate::Error::from),
-            Err(e) => Err(e.into()),
+    // Important: the VM instruction hook does not execute while awaiting Rust async operations.
+    // Handle Ctrl-C here so scripts can be interrupted even when blocked on I/O.
+    let exec_res: crate::Result = tokio::select! {
+        res = async {
+            if let Some(timeout) = policy.timeout {
+                match tokio::time::timeout(timeout, evaluator).await {
+                    Ok(res) => res.map_err(crate::Error::from),
+                    Err(e) => Err(e.into()),
+                }
+            } else {
+                evaluator.await.map_err(crate::Error::from)
+            }
+        } => res,
+        _ = tokio::signal::ctrl_c() => {
+            // Match common shell convention: 128 + SIGINT(2) = 130.
+            let _ = crate::lua::lifecycle::request_shutdown(lua, Some(130));
+            Err(crate::Error::from(mlua::Error::external("interrupted")))
         }
-    } else {
-        evaluator.await.map_err(crate::Error::from)
     };
 
     // Decide a reason for shutdown callbacks.
@@ -107,7 +117,8 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         crate::lua::lifecycle::ShutdownReason::Success
     };
 
-    let shut_res = crate::lua::lifecycle::run_shutdown(lua, reason, None);
+    let error = exec_res.as_ref().err().map(std::string::ToString::to_string);
+    let shut_res = crate::lua::lifecycle::run_shutdown(lua, reason, error);
     match (exec_res, shut_res) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(e)) => Err(e.into()),
