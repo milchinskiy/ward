@@ -679,34 +679,47 @@ pub fn define(lua: &Lua) -> LuaResult<Table> {
     let m = lua.create_table()?;
 
     // cmd(prog, ...args) -> Cmd
-    m.set(
-        "cmd",
-        lua.create_function(|_, (prog, args): (String, Variadic<Value>)| {
-            let args = parse_cmd_args(args)?;
-            Ok(Cmd::new(CmdSpec {
-                program: prog,
-                args,
-                ..Default::default()
-            }))
-        })?,
-    )?;
-
+    m.set("cmd", lua.create_function(lua_cmd)?)?;
     // sh("...") -> Cmd  (explicit shell mode)
-    m.set(
-        "sh",
-        lua.create_function(|_, script: String| {
-            #[cfg(windows)]
-            let (prog, args) = ("cmd".to_string(), vec!["/C".to_string(), script]);
-            #[cfg(not(windows))]
-            let (prog, args) = ("sh".to_string(), vec!["-lc".to_string(), script]);
-
-            Ok(Cmd::new(CmdSpec {
-                program: prog,
-                args,
-                ..Default::default()
-            }))
-        })?,
-    )?;
+    m.set("sh", lua.create_function(lua_sh)?)?;
+    // exit(code)
+    m.set("exit", lua.create_function(lua_exit)?)?;
 
     Ok(m)
+}
+
+fn lua_cmd(_: &Lua, (prog, args): (String, Variadic<Value>)) -> mlua::Result<Cmd> {
+    let args = parse_cmd_args(args)?;
+    Ok(Cmd::new(CmdSpec {
+        program: prog,
+        args,
+        ..Default::default()
+    }))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn lua_sh(_: &Lua, script: String) -> mlua::Result<Cmd> {
+    #[cfg(windows)]
+    let (prog, args) = ("cmd".to_string(), vec!["/C".to_string(), script]);
+    #[cfg(not(windows))]
+    let (prog, args) = ("sh".to_string(), vec!["-lc".to_string(), script]);
+
+    Ok(Cmd::new(CmdSpec {
+        program: prog,
+        args,
+        ..Default::default()
+    }))
+}
+
+fn lua_exit(_: &Lua, code: Option<i64>) -> mlua::Result<()> {
+    let mut code = code.unwrap_or(0);
+    if code < 0 {
+        code = 1;
+    }
+    let code_i32: i32 = if code > i64::from(i32::MAX) {
+        i32::MAX
+    } else {
+        i32::try_from(code).unwrap_or(0)
+    };
+    std::process::exit(code_i32);
 }
