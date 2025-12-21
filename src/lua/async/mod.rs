@@ -26,15 +26,14 @@ impl Drop for Task {
 impl UserData for Task {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("done", |_, this, ()| {
-            Ok(this.handle.as_ref().is_some_and(tokio::task::JoinHandle::is_finished))
+            Ok(this.handle.as_ref().is_none_or(tokio::task::JoinHandle::is_finished))
         });
 
         methods.add_method_mut("cancel", |_, this, ()| {
-            if let Some(h) = this.handle.take() {
-                h.abort();
-            }
-            // Drop receiver so the producer can clean up if it completes.
-            this.rx.take();
+            let Some(h) = this.handle.take() else {
+                return Ok(false);
+            };
+            h.abort();
             Ok(true)
         });
 
@@ -86,35 +85,48 @@ struct Channel {
     inner: Arc<ChannelInner>,
 }
 
-impl Channel {
-    fn drain_registry_queue(&self) {
-        // Best-effort cleanup: remove any queued registry values so they do not leak.
-        // Cannot await here; use try_lock best-effort.
-        let Ok(mut rx) = self.inner.rx.try_lock() else {
-            return;
-        };
-        while let Ok(key) = rx.try_recv() {
-            let _ = self.lua.remove_registry_value(key);
-        }
-    }
-}
-
 impl Drop for Channel {
     fn drop(&mut self) {
         if let Ok(mut txg) = self.inner.tx.lock() {
             *txg = None;
         }
-        self.drain_registry_queue();
+
+        // Drain any queued registry values to avoid leaks. If the receiver is currently locked
+        // by an in-flight `recv()`, schedule a local drain once the lock becomes available.
+        if let Ok(mut rx) = self.inner.rx.try_lock() {
+            while let Ok(key) = rx.try_recv() {
+                let _ = self.lua.remove_registry_value(key);
+            }
+            return;
+        }
+
+        let inner = self.inner.clone();
+        let lua = self.lua.clone();
+        #[allow(clippy::let_underscore_future)]
+        let _ = tokio::task::spawn_local(async move {
+            let mut rx = inner.rx.lock().await;
+            while let Ok(key) = rx.try_recv() {
+                let _ = lua.remove_registry_value(key);
+            }
+        });
     }
 }
 
 impl UserData for Channel {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_async_method("send", |lua, this, v: Value| {
-            // Clone sender so we do not borrow the userdata across await.
-            let tx = this.inner.tx.lock().map_or_else(|_| None, |g| g.clone());
+            // Copy sender handle without borrowing userdata across await.
+            // Use a Result so we can surface mutex poisoning consistently.
+            let tx_res = this
+                .inner
+                .tx
+                .lock()
+                .map(|g| g.clone())
+                .map_err(|_| mlua::Error::external("channel mutex poisoned"));
+
             async move {
                 let closed = Value::String(lua.create_string("closed")?);
+                let tx = tx_res?;
 
                 let Some(tx) = tx else {
                     return Ok(mv2(&lua, Value::Nil, closed));
@@ -177,8 +189,8 @@ impl UserData for Channel {
 
         methods.add_method("try_recv", |lua, this, ()| {
             let Ok(mut rx) = this.inner.rx.try_lock() else {
-                // Someone is currently awaiting recv(); treat as "empty" (or "busy" if you prefer).
-                return Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("empty")?)));
+                // Someone is currently awaiting recv(); report as "busy".
+                return Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("busy")?)));
             };
             match rx.try_recv() {
                 Ok(key) => {
@@ -196,9 +208,13 @@ impl UserData for Channel {
         });
 
         methods.add_method_mut("close", |_, this, ()| {
-            if let Ok(mut txg) = this.inner.tx.lock() {
-                *txg = None;
-            }
+            let mut txg = this
+                .inner
+                .tx
+                .lock()
+                .map_err(|_| mlua::Error::external("channel mutex poisoned"))?;
+            *txg = None;
+            drop(txg);
             Ok(true)
         });
 
@@ -233,6 +249,9 @@ fn parse_capacity(v: Value) -> mlua::Result<usize> {
         Value::Number(n) => {
             if !n.is_finite() || n <= 0.0 {
                 return Err(mlua::Error::external("capacity must be positive"));
+            }
+            if n.fract() != 0.0 {
+                return Err(mlua::Error::external("capacity must be an integer"));
             }
             if n > (usize::MAX as f64) {
                 return Err(mlua::Error::external("capacity overflow"));
