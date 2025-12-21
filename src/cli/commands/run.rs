@@ -1,4 +1,5 @@
 use rust_args_parser as ap;
+use tokio::task::LocalSet;
 
 #[derive(Default, Debug)]
 pub struct RunContext {
@@ -29,8 +30,9 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
                 thread_pool_size: ctx.run.thread_pool_size.unwrap_or(sandbox_default.thread_pool_size),
                 timeout: ctx.run.timeout,
             };
-            runtime
-                .block_on(ward::runner::run_file(ctx.run.file.as_path(), sandbox))
+            let local = LocalSet::new();
+            local
+                .block_on(&runtime, ward::runner::run_file(ctx.run.file.as_path(), sandbox))
                 .map_err(ap::Error::user)
         })
         .opt(

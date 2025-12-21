@@ -1,3 +1,4 @@
+pub mod r#async;
 pub mod console;
 pub mod convert;
 pub mod crypto;
@@ -30,6 +31,7 @@ fn require(
 /// # Errors [`crate::Error`]
 pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
     Ok(vec![
+        ("async".to_string(), r#async::define(lua)?),
         ("convert".to_string(), convert::define(lua)?),
         ("crypto".to_string(), crypto::define(lua)?),
         ("env".to_string(), env::define(lua)?),
