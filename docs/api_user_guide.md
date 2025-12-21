@@ -568,6 +568,141 @@ r:assert_ok()
 print("lines:", r.stdout)
 ```
 
+## 6.5 `ward.async` — tasks and channels
+
+```lua
+local async = require("ward.async")
+```
+
+### 6.5.1 Overview
+
+Ward scripts run in an async-capable Lua runtime. Most operations that involve I/O (process execution, HTTP, timers) are implemented using async Rust internally, but can typically be called from Lua in a straightforward way because Ward drives the runtime for you.
+
+`ward.async` provides **user-level concurrency primitives**:
+
+- **Tasks**: run Lua functions concurrently via `async.spawn(...)`.
+- **Channels**: communicate between tasks with bounded queues via `async.channel(...)`.
+
+These primitives are intended for local concurrency (I/O overlap, worker pools, fan-out/fan-in), not for CPU-parallel Lua execution.
+
+### 6.5.2 Tasks
+
+#### `async.spawn(fn, ...) -> Task`
+
+Spawns a concurrent Lua task that runs `fn(...)`.
+
+```lua
+local t = async.spawn(function(x)
+  return x + 1, "ok"
+end, 41)
+```
+
+#### `Task:join() -> ...`
+
+Waits for the task to finish and returns the function’s return values.
+
+```lua
+local n, s = t:join()
+print(n, s) -- 42  ok
+```
+
+#### `Task:cancel() -> boolean`
+
+Requests task cancellation.
+
+- Returns `true` if cancellation was requested.
+- Returns `false` if the task is already finished (or already cancelled).
+
+#### `Task:done() -> boolean`
+
+Returns `true` when the task has finished.
+
+### 6.5.3 Channels
+
+#### `async.channel(opts?) -> Channel`
+
+Creates a bounded channel.
+
+Accepted `opts`:
+
+- `nil` (defaults apply)
+- a number (capacity)
+- a table: `{ capacity = N }`
+
+If omitted, capacity defaults to **64**.
+
+```lua
+local ch = async.channel({ capacity = 16 })
+```
+
+#### `Channel:send(value) -> true | nil, err`
+
+Async. Sends a value into the channel.
+
+- Returns `true` on success.
+- Returns `nil, "closed"` if the channel is closed.
+
+#### `Channel:try_send(value) -> true | nil, err`
+
+Sync. Attempts to send without waiting.
+
+- Returns `true` on success.
+- Returns `nil, "full"` if the buffer is full.
+- Returns `nil, "closed"` if the channel is closed.
+
+#### `Channel:recv() -> value | nil, err`
+
+Async. Receives a value from the channel.
+
+- Returns the value on success.
+- Returns `nil, "closed"` after the sender is closed **and** the queue is drained.
+
+#### `Channel:try_recv() -> value | nil, err`
+
+Sync. Attempts to receive without waiting.
+
+- Returns the value on success.
+- Returns `nil, "empty"` if no value is available.
+- Returns `nil, "closed"` if the channel is disconnected.
+
+Note: if another task is currently blocked in `recv()`, `try_recv()` may return `nil, "busy"` (implementation detail). Treat both `"empty"` and `"busy"` as retryable states.
+
+#### `Channel:close() -> true`
+
+Closes the **sender** side of the channel.
+
+Important: `close()` does **not** discard queued items. Receivers can continue calling `recv()` until the channel is fully drained and then observe `nil, "closed"`.
+
+### 6.5.4 Examples
+
+#### Fan-out / fan-in
+
+```lua
+local async = require("ward.async")
+local process = require("ward.process")
+
+local workers = 4
+local ch = async.channel({ capacity = 32 })
+
+for i = 1, workers do
+  async.spawn(function()
+    local r = process.cmd("sh", "-lc", "echo worker=" .. i):output()
+    ch:send({ i = i, ok = r.ok, out = r.stdout })
+  end)
+end
+
+for _ = 1, workers do
+  local msg = ch:recv()
+  print(msg.i, msg.ok, msg.out)
+end
+
+ch:close()
+```
+
+#### Worker pool
+
+See `samples/async.worker_pool.lua` for a complete runnable example.
+
 ---
 
 ## 7. `ward.time` — wall clock, parsing, durations, timers
