@@ -1,12 +1,18 @@
 local env = require("ward.env")
 local tpl = require("ward.template.minijinja")
+local c = require("ward.crypto")
 
-print(tpl.render(
-	[[
+local templ = [[
 #!{{ binbash }}
 
 echo "Hello, {{ name|capitalize }}!"
-]],
-	{ binbash = env.which("bash"), name = "ward" },
-	{ lstrip_blocks = true, trim_blocks = true }
-))
+echo "{{ crypt|escape }}"
+]]
+
+print(
+	tpl.render(
+		templ,
+		{ binbash = env.which("bash"), name = "ward", crypt = c.sha256("hello") },
+		{ lstrip_blocks = true, trim_blocks = true }
+	)
+)
