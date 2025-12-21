@@ -42,7 +42,7 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
                     .unwrap_or(0);
 
                 if left_after == 0 {
-                    return Err(mlua::Error::external("script instruction limit exceeded"));
+                    return Err(mlua::Error::external("instruction limit exceeded"));
                 }
 
                 // Drain pending signals and interrupt execution if shutdown requested.

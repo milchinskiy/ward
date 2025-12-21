@@ -19,7 +19,7 @@ pub fn handle() {
         author: Some(env!("CARGO_PKG_AUTHORS")),
     };
 
-    let root = ap::CmdSpec::new("root").help("Ward CLI").subcmd(run::command());
+    let root = ap::CmdSpec::new("ward").help("Ward CLI").subcmd(run::command());
 
     match ap::parse(&env, &root, &args, &mut ctx) {
         Ok(_) => {},
