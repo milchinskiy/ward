@@ -66,6 +66,8 @@ reqwest = { version = "0.12.9", default-features = false, features = [
 minijinja = { version = "2.3.1", default-features = false, features = [
   "builtins",
   "serde",
+  "loader",
+  "urlencode",
 ] }
 rpassword = "7.4.0"
 serde_ext_duration = "0.2.0"

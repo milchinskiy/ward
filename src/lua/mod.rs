@@ -11,6 +11,7 @@ pub mod log;
 pub mod module;
 pub mod net;
 pub mod process;
+pub mod template;
 pub mod term;
 pub mod time;
 
@@ -41,6 +42,7 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("net".to_string(), net::define(lua)?),
         ("module".to_string(), module::define(lua)?),
         ("process".to_string(), process::define(lua)?),
+        ("template".to_string(), template::define(lua)?),
         ("term".to_string(), term::define(lua)?),
         ("time".to_string(), time::define(lua)?),
     ])
