@@ -22,7 +22,14 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
             .required(),
         )
         .handler(|_, ctx: &mut super::Context| {
-            let runtime = tokio::runtime::Runtime::new().map_err(ap::Error::user)?;
+            let workers = ctx.run.thread_pool_size.unwrap_or(2);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .max_blocking_threads(workers)
+                .enable_all()
+                .build()
+                .map_err(ap::Error::user)?;
+
             let sandbox_default = ward::runner::sandbox::SandboxPolicy::default();
             let sandbox = ward::runner::sandbox::SandboxPolicy {
                 memory_limit_bytes: ctx.run.memory_limit.unwrap_or(sandbox_default.memory_limit_bytes),
