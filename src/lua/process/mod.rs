@@ -15,6 +15,8 @@ use tokio::{
     time,
 };
 
+type SharedReader = Arc<AsyncMutex<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send + 'static>>>>;
+
 #[derive(Clone, Default)]
 struct CmdSpec {
     program: String,
@@ -85,18 +87,7 @@ impl Pipeline {
 #[derive(Clone)]
 struct LineStream {
     // Serialized line reads.
-    inner: Arc<AsyncMutex<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send + 'static>>>>,
-}
-
-impl LineStream {
-    fn from_reader<R>(r: R) -> Self
-    where
-        R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    {
-        Self {
-            inner: Arc::new(AsyncMutex::new(BufReader::new(Box::new(r)))),
-        }
-    }
+    inner: SharedReader,
 }
 
 impl UserData for LineStream {
@@ -140,21 +131,217 @@ impl UserData for LineStream {
 }
 
 #[derive(Clone)]
+struct ByteStream {
+    // Serialized chunk reads.
+    inner: SharedReader,
+}
+
+impl ByteStream {
+    fn from_shared(inner: SharedReader) -> Self {
+        Self { inner }
+    }
+}
+
+impl UserData for ByteStream {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // Await the next chunk from the stream.
+        //
+        // bytes:read(n?) -> chunk | nil, err
+        // - n defaults to 16384
+        // - err is "eof" when the stream ends
+        methods.add_async_method("read", |lua, this, n: Option<i64>| {
+            let inner = this.inner.clone();
+            async move {
+                let n = n.unwrap_or(16 * 1024);
+                if n <= 0 {
+                    return Err(mlua::Error::RuntimeError("read(n): n must be > 0".into()));
+                }
+
+                let mut guard = inner.lock().await;
+                let mut buf = vec![0_u8; usize::try_from(n).unwrap_or(0)];
+                match guard.read(&mut buf).await {
+                    Ok(0) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string("eof")?));
+                        Ok(mv)
+                    }
+                    Ok(sz) => {
+                        buf.truncate(sz);
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::String(lua.create_string(&buf)?));
+                        Ok(mv)
+                    }
+                    Err(e) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                        Ok(mv)
+                    }
+                }
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ByteStream()".to_string()));
+    }
+}
+
+#[derive(Clone)]
+struct ProcStdin {
+    // A piped stdin handle that can be written to from Lua.
+    inner: Arc<AsyncMutex<Option<ChildStdin>>>,
+}
+
+impl ProcStdin {
+    fn new(w: ChildStdin) -> Self {
+        Self {
+            inner: Arc::new(AsyncMutex::new(Some(w))),
+        }
+    }
+}
+
+impl UserData for ProcStdin {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // stdin:write("...") -> true | nil, err
+        methods.add_async_method("write", |lua, this, data: Value| {
+            let inner = this.inner.clone();
+            // Copy bytes synchronously (do not hold Lua values across await).
+            let bytes_res: LuaResult<Vec<u8>> = match data {
+                Value::String(s) => Ok(s.as_bytes().to_vec()),
+                _ => Err(mlua::Error::RuntimeError("stdin:write(data): data must be a string".into())),
+            };
+
+            async move {
+                let bytes = bytes_res?;
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+                if let Err(e) = w.write_all(&bytes).await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        // stdin:writeln("...") -> true | nil, err
+        methods.add_async_method("writeln", |lua, this, s: mlua::String| {
+            let inner = this.inner.clone();
+            let mut bytes = s.as_bytes().to_vec();
+            bytes.push(b'\n');
+            async move {
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+                if let Err(e) = w.write_all(&bytes).await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        methods.add_async_method("flush", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+                if let Err(e) = w.flush().await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        // stdin:close() -> true
+        methods.add_async_method("close", |_, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                inner.lock().await.take();
+                Ok(true)
+            }
+        });
+
+        methods.add_async_method("is_closed", |_, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let guard = inner.lock().await;
+                Ok(guard.is_none())
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcStdin()".to_string()));
+    }
+}
+
+#[derive(Clone)]
 struct ProcChild {
     pid: i64,
     child: Arc<AsyncMutex<Child>>,
-    stdout: Option<LineStream>,
-    stderr: Option<LineStream>,
+    stdin: Option<ProcStdin>,
+    stdout: Option<SharedReader>,
+    stderr: Option<SharedReader>,
 }
 
 impl UserData for ProcChild {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("pid", |_, this, ()| Ok(this.pid));
 
+        methods.add_method("stdin", |lua, this, ()| {
+            let mut mv = MultiValue::new();
+            if let Some(s) = &this.stdin {
+                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
+            } else {
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua.create_string("not_piped")?));
+            }
+            Ok(mv)
+        });
+
         methods.add_method("stdout_lines", |lua, this, ()| {
             let mut mv = MultiValue::new();
-            if let Some(s) = &this.stdout {
-                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
+            if let Some(r) = &this.stdout {
+                mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: r.clone() })?));
+            } else {
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua.create_string("not_piped")?));
+            }
+            Ok(mv)
+        });
+
+        methods.add_method("stdout_bytes", |lua, this, ()| {
+            let mut mv = MultiValue::new();
+            if let Some(r) = &this.stdout {
+                mv.push_back(Value::UserData(lua.create_userdata(ByteStream::from_shared(r.clone()))?));
             } else {
                 mv.push_back(Value::Nil);
                 mv.push_back(Value::String(lua.create_string("not_piped")?));
@@ -164,8 +351,19 @@ impl UserData for ProcChild {
 
         methods.add_method("stderr_lines", |lua, this, ()| {
             let mut mv = MultiValue::new();
-            if let Some(s) = &this.stderr {
-                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
+            if let Some(r) = &this.stderr {
+                mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: r.clone() })?));
+            } else {
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua.create_string("not_piped")?));
+            }
+            Ok(mv)
+        });
+
+        methods.add_method("stderr_bytes", |lua, this, ()| {
+            let mut mv = MultiValue::new();
+            if let Some(r) = &this.stderr {
+                mv.push_back(Value::UserData(lua.create_userdata(ByteStream::from_shared(r.clone()))?));
             } else {
                 mv.push_back(Value::Nil);
                 mv.push_back(Value::String(lua.create_string("not_piped")?));
@@ -335,10 +533,11 @@ impl UserData for Cmd {
             async move { run_pipeline(vec![spec], false, RunMode::Capture, overlay?).await }
         });
 
-        // Spawn a long-running child process and optionally expose stdout/stderr as async line streams.
+        // Spawn a long-running child process and optionally expose stdin/stdout/stderr as async streams.
         //
         // cmd:spawn(opts?) -> ProcChild
         // opts:
+        //   stdin  = true|false|"pipe"|"inherit"  (default: false, unless stdin() / stdin_file() was used)
         //   stdout = true|false|"pipe"|"inherit"  (default: true)
         //   stderr = true|false|"pipe"|"inherit"  (default: spec.stderr_to_stdout ? true : false)
         //
@@ -348,16 +547,18 @@ impl UserData for Cmd {
 
             // Parse options synchronously (avoid holding Lua values across await).
             async move {
+                let mut stdin_piped = !matches!(spec.stdin, StdinSpec::Inherit);
                 let mut stdout_piped = true;
                 let mut stderr_piped = spec.stderr_to_stdout;
                 if let Some(t) = opts {
+                    stdin_piped = parse_stdio_opt(&t, "stdin", stdin_piped)?;
                     stdout_piped = parse_stdio_opt(&t, "stdout", stdout_piped)?;
                     stderr_piped = parse_stdio_opt(&t, "stderr", stderr_piped)?;
                 }
 
                 let overlay = crate::lua::env::overlay_snapshot(&lua);
 
-                spawn_cmd(spec, stdout_piped, stderr_piped, overlay?).await
+                spawn_cmd(spec, stdin_piped, stdout_piped, stderr_piped, overlay?).await
             }
         });
 
@@ -504,6 +705,7 @@ async fn pump_to_duplex_writer<R: tokio::io::AsyncRead + Unpin + Send + 'static>
 #[allow(clippy::too_many_lines)]
 async fn spawn_cmd(
     spec: CmdSpec,
+    stdin_piped: bool,
     stdout_piped: bool,
     stderr_piped: bool,
     overlay: HashMap<String, Option<String>>,
@@ -515,10 +717,14 @@ async fn spawn_cmd(
     apply_common_opts(&mut c, &spec);
 
     // stdin
-    match &spec.stdin {
-        StdinSpec::Inherit => c.stdin(std::process::Stdio::inherit()),
-        _ => c.stdin(std::process::Stdio::piped()),
-    };
+    // - If stdin() / stdin_file() was set (Bytes/File), we must pipe to feed it.
+    // - If stdin_piped=true, pipe so Lua can write interactively.
+    // - Otherwise inherit.
+    if stdin_piped || !matches!(spec.stdin, StdinSpec::Inherit) {
+        c.stdin(std::process::Stdio::piped());
+    } else {
+        c.stdin(std::process::Stdio::inherit());
+    }
 
     // stdout/stderr
     if stdout_piped {
@@ -545,11 +751,20 @@ async fn spawn_cmd(
     let mut child = c.spawn().map_err(mlua::Error::external)?;
     let pid = child.id().map_or(0_i64, i64::from);
 
-    // Feed stdin for bytes/file and close.
-    feed_first_stdin(&mut child, spec.stdin.clone()).await?;
+    // Stdin handle (for interactive use) OR one-shot feed+close.
+    let mut stdin_handle: Option<ProcStdin> = None;
+    if matches!(spec.stdin, StdinSpec::Inherit) {
+        if stdin_piped && let Some(w) = child.stdin.take() {
+            stdin_handle = Some(ProcStdin::new(w));
+        }
+    } else {
+        // If stdin was configured via cmd:stdin(...) / cmd:stdin_file(...), keep existing behavior:
+        // write once and close stdin.
+        feed_first_stdin(&mut child, spec.stdin.clone()).await?;
+    }
 
-    let mut stdout_stream: Option<LineStream> = None;
-    let mut stderr_stream: Option<LineStream> = None;
+    let mut stdout_stream: Option<SharedReader> = None;
+    let mut stderr_stream: Option<SharedReader> = None;
 
     if need_merge {
         let out = child
@@ -568,19 +783,20 @@ async fn spawn_cmd(
         tokio::spawn(pump_to_duplex_writer(out, writer.clone()));
         tokio::spawn(pump_to_duplex_writer(err, writer));
 
-        stdout_stream = Some(LineStream::from_reader(reader_end));
+        stdout_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(reader_end)))));
     } else {
         if stdout_piped && let Some(out) = child.stdout.take() {
-            stdout_stream = Some(LineStream::from_reader(out));
+            stdout_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(out)))));
         }
         if stderr_piped && let Some(err) = child.stderr.take() {
-            stderr_stream = Some(LineStream::from_reader(err));
+            stderr_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(err)))));
         }
     }
 
     Ok(ProcChild {
         pid,
         child: Arc::new(AsyncMutex::new(child)),
+        stdin: stdin_handle,
         stdout: stdout_stream,
         stderr: stderr_stream,
     })
