@@ -515,6 +515,8 @@ r:assert_ok("echo failed")
 
 ### 6.3 `Cmd` userdata
 
+In addition to one-shot execution (`run` / `output`), `Cmd` supports spawning long-running processes and streaming their stdio.
+
 Builder methods (fluent):
 
 - `cmd:cwd(path) -> Cmd`
@@ -524,6 +526,11 @@ Builder methods (fluent):
 - `cmd:stdin(data) -> Cmd` (bytes string)
 - `cmd:stdin_file(path) -> Cmd`
 - `cmd:stderr_to_stdout(true|false) -> Cmd`
+- `cmd:spawn(opts?) -> ProcChild`
+
+Notes:
+
+- `cmd:stdin(...)` / `cmd:stdin_file(...)` are **one-shot** stdin configuration for `run/output/spawn` and will be written then closed when spawning.
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
 
 Terminal operations:
@@ -541,6 +548,147 @@ Example:
 local r = process.cmd("git", "rev-parse", "HEAD"):output()
 r:assert_ok()
 print(r.stdout)
+```
+
+#### 6.3.1 `Cmd:spawn(opts?) -> ProcChild`
+
+Spawns a long-running child process and returns a `ProcChild` handle. This is used for:
+
+- Streaming stdout/stderr incrementally (lines or raw bytes)
+- Interactive processes (writing to stdin)
+- Long-running daemons/subscriptions (e.g., `pw-mon`, `tail -f`, etc.)
+
+`opts` is an optional table:
+
+- `stdin`  (boolean or `"pipe"|"inherit"`)
+  - `true` / `"pipe"`: pipe stdin so Lua can write via `ProcChild:stdin()`
+  - `false` / `"inherit"`: inherit parent stdin
+  - Default: inferred. If `cmd:stdin(...)` / `cmd:stdin_file(...)` was used, Ward will pipe stdin to feed the data. Otherwise it typically inherits unless you request piping.
+- `stdout` (boolean or `"pipe"|"inherit"`, default `true`)
+  - `true` / `"pipe"`: pipe stdout so you can stream it
+  - `false` / `"inherit"`: inherit parent stdout
+- `stderr` (boolean or `"pipe"|"inherit"`)
+  - Default: `true` when `cmd:stderr_to_stdout(true)` is set, otherwise implementation-defined.
+
+Important:
+
+- If you call `cmd:stderr_to_stdout(true)`, Ward merges stderr into the stdout stream (similar to `2>&1`). In this case, stderr is not available separately and must be read from stdout.
+- If you configure stdin via `cmd:stdin(...)` / `cmd:stdin_file(...)`, Ward will write the configured input and then **close** stdin (one-shot). For interactive stdin, do not set `cmd:stdin(...)`; instead use `spawn({ stdin = true })` and then write via `ProcChild:stdin()`.
+
+Example (spawn + line streaming):
+
+```lua
+local p = require("ward.process")
+
+local child = p.cmd("sh", "-lc", "printf 'a\\nb\\n' && sleep 1"):spawn({ stdout = true })
+local out = assert(child:stdout_lines())
+
+while true do
+  local line, err = out:wait()
+  if not line then break end
+  print("line:", line)
+end
+
+child:wait()
+```
+
+#### 6.3.2 `ProcChild` userdata
+
+Represents a spawned child process.
+
+Methods:
+
+- `child:pid() -> integer`
+- `child:stdin() -> ProcStdin | nil, err`
+  - Returns `nil, "not_piped"` if stdin is not piped.
+- `child:stdout_lines() -> LineStream | nil, err`
+  - Returns `nil, "not_piped"` if stdout is not piped.
+- `child:stderr_lines() -> LineStream | nil, err`
+  - Returns `nil, "not_piped"` if stderr is not piped (or merged into stdout).
+- `child:stdout_bytes() -> ByteStream | nil, err`
+  - Returns `nil, "not_piped"` if stdout is not piped.
+- `child:stderr_bytes() -> ByteStream | nil, err`
+  - Returns `nil, "not_piped"` if stderr is not piped (or merged into stdout).
+- `child:kill() -> boolean` (async)
+- `child:wait() -> CmdResult` (async)
+
+`ProcChild:wait()` returns a `CmdResult` with:
+
+- `ok`, `code`, `signal`
+- `stdout`/`stderr` are typically `nil` because streaming consumption is incremental, not captured.
+
+#### 6.3.3 `ProcStdin` userdata (interactive stdin)
+
+Returned by `ProcChild:stdin()` when stdin is piped.
+
+Methods (all async unless noted):
+
+- `stdin:write(bytes_string) -> true | nil, err`
+- `stdin:writeln(string) -> true | nil, err` — writes string + `\\n`
+- `stdin:flush() -> true | nil, err`
+- `stdin:close() -> true`
+- `stdin:is_closed() -> boolean`
+
+Example (interactive stdin):
+
+```lua
+local p = require("ward.process")
+
+local child = p.cmd("cat"):spawn({ stdin = true, stdout = true })
+local stdin = assert(child:stdin())
+local out = assert(child:stdout_lines())
+
+stdin:writeln("hello")
+stdin:writeln("world")
+stdin:close()
+
+while true do
+  local line, err = out:wait()
+  if not line then break end
+  print("echo:", line)
+end
+
+child:wait()
+```
+
+#### 6.3.4 `LineStream` userdata (line-by-line streaming)
+
+Returned by `ProcChild:stdout_lines()` or `ProcChild:stderr_lines()`.
+
+Methods:
+
+- `stream:wait() -> line | nil, err`
+  - `err` is `"eof"` when the stream ends.
+
+This object follows Ward’s “awaitable” contract (`:wait()`), so it can be used with `async.select(...)`.
+
+#### 6.3.5 `ByteStream` userdata (raw byte streaming)
+
+Returned by `ProcChild:stdout_bytes()` or `ProcChild:stderr_bytes()`.
+
+Methods:
+
+- `stream:read(n?) -> bytes | nil, err`
+  - `n` defaults to 16384
+  - returns a **bytes string** (binary-safe; may contain `\\0`)
+  - `err` is `"eof"` when the stream ends.
+
+Note: `ByteStream` uses `read(...)` (not `wait()`), so it is not directly compatible with `async.select(...)` unless wrapped in a task.
+
+Example (bytes):
+
+```lua
+local p = require("ward.process")
+
+local child = p.cmd("sh", "-lc", "printf 'A\\0B'"):spawn({ stdout = true })
+local bs = assert(child:stdout_bytes())
+local chunk, err = bs:read(3)
+assert(chunk, err)
+
+print("len:", #chunk)
+print("bytes:", string.byte(chunk, 1, #chunk))
+
+child:wait()
 ```
 
 ### 6.4 `Pipeline` userdata
@@ -775,6 +923,37 @@ ch:close()
 #### Worker pool
 
 See `samples/async.worker_pool.lua` for a complete runnable example.
+
+### 6.6 Streaming example: watch a long-running command and react to new output
+
+This pattern is common in bash/sh scripting (e.g., `tail -f ... | while read ...; do ...; done`).
+In Ward, do it with `spawn()` and `stdout_lines()`:
+
+```lua
+local async = require("ward.async")
+local p = require("ward.process")
+local str = require("ward.helpers.string")
+
+local NEEDLE = "PipeWire:Interface:Device"
+
+local child = p.cmd("pw-mon", "-oap"):spawn({ stdout = true })
+local out = assert(child:stdout_lines())
+
+while true do
+  local line, err = out:wait()
+  if not line then break end
+
+  -- Only reacts to *new* lines, not the initial process output snapshot.
+  if str.contains(line, NEEDLE) then
+    local r = p.cmd("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"):output()
+    if r.ok then
+      print(str.trim(r.stdout or ""))
+    end
+  end
+end
+
+child:wait()
+```
 
 ---
 
