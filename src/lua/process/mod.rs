@@ -1,4 +1,6 @@
-use mlua::{Lua, MetaMethod, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic};
+use mlua::{
+    Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
+};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -7,7 +9,7 @@ use std::{
 };
 use tokio::{
     fs,
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex as AsyncMutex,
     time,
@@ -77,6 +79,127 @@ impl Pipeline {
     fn snapshot(&self) -> (Vec<CmdSpec>, bool) {
         let st = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         (st.specs.clone(), st.pipefail)
+    }
+}
+
+#[derive(Clone)]
+struct LineStream {
+    // Serialized line reads.
+    inner: Arc<AsyncMutex<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send + 'static>>>>,
+}
+
+impl LineStream {
+    fn from_reader<R>(r: R) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        Self {
+            inner: Arc::new(AsyncMutex::new(BufReader::new(Box::new(r)))),
+        }
+    }
+}
+
+impl UserData for LineStream {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // Await the next line from the stream.
+        // Returns: line | nil, err
+        // err is "eof" when the stream ends.
+        methods.add_async_method("wait", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let mut line = String::new();
+                match guard.read_line(&mut line).await {
+                    Ok(0) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string("eof")?));
+                        Ok(mv)
+                    }
+                    Ok(_) => {
+                        // Drop trailing newline(s) only.
+                        while line.ends_with('\n') || line.ends_with('\r') {
+                            line.pop();
+                        }
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::String(lua.create_string(line.as_bytes())?));
+                        Ok(mv)
+                    }
+                    Err(e) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                        Ok(mv)
+                    }
+                }
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("LineStream()".to_string()));
+    }
+}
+
+#[derive(Clone)]
+struct ProcChild {
+    pid: i64,
+    child: Arc<AsyncMutex<Child>>,
+    stdout: Option<LineStream>,
+    stderr: Option<LineStream>,
+}
+
+impl UserData for ProcChild {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("pid", |_, this, ()| Ok(this.pid));
+
+        methods.add_method("stdout_lines", |lua, this, ()| {
+            let mut mv = MultiValue::new();
+            if let Some(s) = &this.stdout {
+                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
+            } else {
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua.create_string("not_piped")?));
+            }
+            Ok(mv)
+        });
+
+        methods.add_method("stderr_lines", |lua, this, ()| {
+            let mut mv = MultiValue::new();
+            if let Some(s) = &this.stderr {
+                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
+            } else {
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua.create_string("not_piped")?));
+            }
+            Ok(mv)
+        });
+
+        methods.add_async_method("kill", |_, this, ()| {
+            let child = this.child.clone();
+            async move {
+                let mut ch = child.lock().await;
+                Ok(ch.kill().await.is_ok())
+            }
+        });
+
+        methods.add_async_method("wait", |_, this, ()| {
+            let child = this.child.clone();
+            async move {
+                let mut ch = child.lock().await;
+                let status = ch.wait().await.map_err(mlua::Error::external)?;
+                drop(ch);
+                let (code, signal) = normalize_status(status);
+                Ok(CmdResult {
+                    ok: code == 0,
+                    code,
+                    signal,
+                    stdout: None,
+                    stderr: None,
+                    steps: vec![code],
+                })
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcChild()".to_string()));
     }
 }
 
@@ -212,6 +335,32 @@ impl UserData for Cmd {
             async move { run_pipeline(vec![spec], false, RunMode::Capture, overlay?).await }
         });
 
+        // Spawn a long-running child process and optionally expose stdout/stderr as async line streams.
+        //
+        // cmd:spawn(opts?) -> ProcChild
+        // opts:
+        //   stdout = true|false|"pipe"|"inherit"  (default: true)
+        //   stderr = true|false|"pipe"|"inherit"  (default: spec.stderr_to_stdout ? true : false)
+        //
+        // If cmd:stderr_to_stdout(true) is set, spawn() merges child stderr into the stdout stream.
+        methods.add_async_method("spawn", |lua, this, opts: Option<Table>| {
+            let spec = this.snapshot();
+
+            // Parse options synchronously (avoid holding Lua values across await).
+            async move {
+                let mut stdout_piped = true;
+                let mut stderr_piped = spec.stderr_to_stdout;
+                if let Some(t) = opts {
+                    stdout_piped = parse_stdio_opt(&t, "stdout", stdout_piped)?;
+                    stderr_piped = parse_stdio_opt(&t, "stderr", stderr_piped)?;
+                }
+
+                let overlay = crate::lua::env::overlay_snapshot(&lua);
+
+                spawn_cmd(spec, stdout_piped, stderr_piped, overlay?).await
+            }
+        });
+
         // cmd1 | cmd2
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
     }
@@ -284,6 +433,29 @@ impl UserData for Pipeline {
     }
 }
 
+fn parse_stdio_opt(t: &Table, key: &str, default: bool) -> LuaResult<bool> {
+    let Some(v) = t.get::<Option<Value>>(key)? else {
+        return Ok(default);
+    };
+    match v {
+        Value::Nil => Ok(default),
+        Value::Boolean(b) => Ok(b),
+        Value::String(s) => {
+            let s = s.to_str()?;
+            match s.to_lowercase().as_str() {
+                "pipe" => Ok(true),
+                "inherit" => Ok(false),
+                _ => Err(mlua::Error::RuntimeError(format!(
+                    "{key} must be true/false or 'pipe'/'inherit'"
+                ))),
+            }
+        }
+        _ => Err(mlua::Error::RuntimeError(format!(
+            "{key} must be true/false or 'pipe'/'inherit'"
+        ))),
+    }
+}
+
 fn apply_env_overlay(cmd: &mut Command, overlay: &HashMap<String, Option<String>>) {
     for (k, v) in overlay {
         match v {
@@ -309,6 +481,109 @@ fn pipe_value(lhs: CmdSpec, rhs: Value) -> LuaResult<Pipeline> {
         }
         _ => Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into())),
     }
+}
+
+async fn pump_to_duplex_writer<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut reader: R,
+    writer: Arc<AsyncMutex<tokio::io::DuplexStream>>,
+) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut w = writer.lock().await;
+                if w.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn spawn_cmd(
+    spec: CmdSpec,
+    stdout_piped: bool,
+    stderr_piped: bool,
+    overlay: HashMap<String, Option<String>>,
+) -> LuaResult<ProcChild> {
+    let mut c = Command::new(&spec.program);
+    c.kill_on_drop(true);
+    c.args(&spec.args);
+    apply_env_overlay(&mut c, &overlay);
+    apply_common_opts(&mut c, &spec);
+
+    // stdin
+    match &spec.stdin {
+        StdinSpec::Inherit => c.stdin(std::process::Stdio::inherit()),
+        _ => c.stdin(std::process::Stdio::piped()),
+    };
+
+    // stdout/stderr
+    if stdout_piped {
+        c.stdout(std::process::Stdio::piped());
+    } else {
+        c.stdout(std::process::Stdio::inherit());
+    }
+
+    let need_merge = spec.stderr_to_stdout;
+    if need_merge {
+        if !stdout_piped {
+            return Err(mlua::Error::RuntimeError(
+                "spawn(): stdout must be piped when stderr_to_stdout is enabled".into(),
+            ));
+        }
+        // We must pipe stderr so we can merge it into stdout.
+        c.stderr(std::process::Stdio::piped());
+    } else if stderr_piped {
+        c.stderr(std::process::Stdio::piped());
+    } else {
+        c.stderr(std::process::Stdio::inherit());
+    }
+
+    let mut child = c.spawn().map_err(mlua::Error::external)?;
+    let pid = child.id().map_or(0_i64, i64::from);
+
+    // Feed stdin for bytes/file and close.
+    feed_first_stdin(&mut child, spec.stdin.clone()).await?;
+
+    let mut stdout_stream: Option<LineStream> = None;
+    let mut stderr_stream: Option<LineStream> = None;
+
+    if need_merge {
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| mlua::Error::RuntimeError("spawn(): missing stdout".into()))?;
+        let err = child
+            .stderr
+            .take()
+            .ok_or_else(|| mlua::Error::RuntimeError("spawn(): missing stderr".into()))?;
+
+        let (reader_end, writer_end) = tokio::io::duplex(64 * 1024);
+        let writer = Arc::new(AsyncMutex::new(writer_end));
+
+        // Pump both stdout and stderr into one reader.
+        tokio::spawn(pump_to_duplex_writer(out, writer.clone()));
+        tokio::spawn(pump_to_duplex_writer(err, writer));
+
+        stdout_stream = Some(LineStream::from_reader(reader_end));
+    } else {
+        if stdout_piped && let Some(out) = child.stdout.take() {
+            stdout_stream = Some(LineStream::from_reader(out));
+        }
+        if stderr_piped && let Some(err) = child.stderr.take() {
+            stderr_stream = Some(LineStream::from_reader(err));
+        }
+    }
+
+    Ok(ProcChild {
+        pid,
+        child: Arc::new(AsyncMutex::new(child)),
+        stdout: stdout_stream,
+        stderr: stderr_stream,
+    })
 }
 
 enum RunMode {
