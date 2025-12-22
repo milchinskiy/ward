@@ -582,10 +582,21 @@ Ward scripts run in an async-capable Lua runtime. Most operations that involve I
 
 - **Tasks**: run Lua functions concurrently via `async.spawn(...)`.
 - **Channels**: communicate between tasks with bounded queues via `async.channel(...)`.
+- **Await helpers**: a single awaitable contract (`:wait()` / `__call()`) used consistently by `async.await` and `async.select`.
 
 These primitives are intended for local concurrency (I/O overlap, worker pools, fan-out/fan-in), not for CPU-parallel Lua execution.
 
-### 6.5.2 Tasks
+### 6.5.2 Awaitables contract (important)
+
+Ward uses a single user-facing await protocol:
+
+- An **awaitable** is a userdata that implements `:wait()` (preferred) and may also implement `__call()` so it can be awaited via `a()`.
+- `async.await(awaitable)` and `async.select(list)` operate on this protocol.
+- `Task` and `Channel` are awaitables via `Task:wait()` and `Channel:wait()`.
+
+This contract exists to keep concurrency composable: you can pass awaitables into `async.select` without “eagerly awaiting” them first.
+
+### 6.5.3 Tasks
 
 #### `async.spawn(fn, ...) -> Task`
 
@@ -597,7 +608,13 @@ local t = async.spawn(function(x)
 end, 41)
 ```
 
-#### `Task:join() -> ...`
+**Lifetime and cancellation semantics**
+
+Tasks are **structured by default**: if the `Task` handle becomes unreachable and is garbage-collected (or dropped by losing scope), the underlying task may be aborted.
+
+If you intentionally want a “fire-and-forget” task, call `t:detach()` to prevent abort-on-drop. Prefer structured tasks unless you have a clear reason to detach.
+
+#### `Task:wait() -> ...`
 
 Waits for the task to finish and returns the function’s return values.
 
@@ -605,6 +622,8 @@ Waits for the task to finish and returns the function’s return values.
 local n, s = t:join()
 print(n, s) -- 42  ok
 ```
+
+This makes `Task` compatible with the awaitables contract and with `async.select`.
 
 #### `Task:cancel() -> boolean`
 
@@ -617,7 +636,14 @@ Requests task cancellation.
 
 Returns `true` when the task has finished.
 
-### 6.5.3 Channels
+#### `Task:detach() -> boolean`
+
+Detaches the task from structured cancellation-on-drop/GC.
+
+- Returns `true` after switching the task into detached mode.
+- After detaching, dropping the `Task` handle will **not** abort the underlying task.
+
+### 6.5.4 Channels
 
 #### `async.channel(opts?) -> Channel`
 
@@ -650,12 +676,14 @@ Sync. Attempts to send without waiting.
 - Returns `nil, "full"` if the buffer is full.
 - Returns `nil, "closed"` if the channel is closed.
 
-#### `Channel:recv() -> value | nil, err`
+#### `Channel:wait() -> value | nil, err`
 
 Async. Receives a value from the channel.
 
 - Returns the value on success.
 - Returns `nil, "closed"` after the sender is closed **and** the queue is drained.
+
+This makes `Channel` compatible with the awaitables contract and with `async.select`.
 
 #### `Channel:try_recv() -> value | nil, err`
 
@@ -665,30 +693,30 @@ Sync. Attempts to receive without waiting.
 - Returns `nil, "empty"` if no value is available.
 - Returns `nil, "closed"` if the channel is disconnected.
 
-Note: if another task is currently blocked in `recv()`, `try_recv()` may return `nil, "busy"` (implementation detail). Treat both `"empty"` and `"busy"` as retryable states.
+Note: if another task is currently blocked in `wait()`, `try_recv()` may return `nil, "busy"` (implementation detail). Treat both `"empty"` and `"busy"` as retryable states.
 
 #### `Channel:close() -> true`
 
 Closes the **sender** side of the channel.
 
-Important: `close()` does **not** discard queued items. Receivers can continue calling `recv()` until the channel is fully drained and then observe `nil, "closed"`.
+Important: `close()` does **not** discard queued items. Receivers can continue calling `wait()` until the channel is fully drained and then observe `nil, "closed"`.
 
-### 6.5.4 Selecting across awaitables
+### 6.5.5 Selecting across awaitables
 
 #### `async.select(list) -> idx, ...`
 
 Races multiple awaitables concurrently and returns the first one that completes.
 `list` must be an array-like table of **userdata awaitables**. For convenience, Ward also accepts:
 
-- `Task` userdata (waited via `:join()`)
-- `Channel` userdata (waited via `:recv()`)
+- `Task` userdata (waited via `:wait()`)
+- `Channel` userdata (waited via `:wait()`)
 
 The return value is:
 
 - `idx` — the **1-based** index into `list` that completed first
 - followed by that awaitable’s return values
 
-Note: `async.select` cancels the non-winning internal waiters. This is generally what you want for a “race”. If you pass `Task` handles, the losing tasks may be aborted if they are dropped/cancelled as a result.
+Note: `async.select` cancels the non-winning internal *waiters* (the race participants), but it does not automatically cancel arbitrary underlying work unless that work is itself cancellation-aware. For example, if you race a long-running task against a timeout, the task will continue running unless you explicitly cancel it (or allow it to be aborted via structured drop/GC behavior).
 
 Example: race a task against a timeout
 
@@ -705,7 +733,20 @@ local idx, v = async.select({ t, time.sleep(0.05) })
 print("winner", idx, v)
 ```
 
-### 6.5.5 Examples
+### 6.5.6 `async.await(awaitable) -> ...`
+
+Awaits a single awaitable userdata using the awaitables contract (`:wait()` preferred, or `__call()`).
+
+This is mostly a convenience wrapper for readability and for writing higher-level helpers.
+
+```lua
+local async = require("ward.async")
+local time = require("ward.time")
+
+async.await(time.sleep(0.1))
+```
+
+### 6.5.7 Examples
 
 #### Fan-out / fan-in
 
@@ -724,7 +765,7 @@ for i = 1, workers do
 end
 
 for _ = 1, workers do
-  local msg = ch:recv()
+  local msg = ch:wait()
   print(msg.i, msg.ok, msg.out)
 end
 

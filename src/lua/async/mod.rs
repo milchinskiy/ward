@@ -12,41 +12,79 @@ use std::task::Poll;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 
 async fn await_userdata(ud: AnyUserData) -> mlua::Result<MultiValue> {
-    // Convenience: let users pass Task or Channel directly.
-    // This is needed for `async.select`, because calling `t:join()` / `ch:recv()` in Lua would
-    // eagerly await the first operation and prevent concurrent waiting.
-    if let Ok(join_fn) = ud.get::<Function>("join") {
-        return join_fn.call_async::<MultiValue>((ud.clone(),)).await;
-    }
-
-    if let Ok(recv_fn) = ud.get::<Function>("recv") {
-        return recv_fn.call_async::<MultiValue>((ud.clone(),)).await;
-    }
-
-    // Prefer `wait()` for composability.
     if let Ok(wait_fn) = ud.get::<Function>("wait") {
         return wait_fn.call_async::<MultiValue>((ud.clone(),)).await;
     }
 
-    // Fallback to calling the userdata itself (requires `MetaMethod::Call`).
+    // Optional: calling userdata directly (requires `MetaMethod::Call`).
     ud.call_async::<MultiValue>(())
         .await
-        .map_err(|_| mlua::Error::external("awaitable has neither join(), recv(), wait() nor __call()"))
+        .map_err(|_| mlua::Error::external("awaitable must implement wait() (or __call())"))
+}
+
+async fn task_join(lua: Lua, this: &mut Task) -> mlua::Result<MultiValue> {
+    let rx = this
+        .rx
+        .take()
+        .ok_or_else(|| mlua::Error::external("task already joined"))?;
+
+    // Await completion.
+    let Ok(res) = rx.await else {
+        // Sender dropped without sending: cancelled/aborted.
+        return Err(mlua::Error::external("cancelled"));
+    };
+
+    // The join handle may still exist if the producer finished quickly;
+    // we can drop it now.
+    this.handle.take();
+
+    let key = res?;
+
+    // Materialize return values from registry table.
+    let t: mlua::Table = lua.registry_value(&key)?;
+    lua.remove_registry_value(key)?;
+
+    let mut mv = MultiValue::new();
+    let len = i64::try_from(t.raw_len()).map_err(|_| mlua::Error::external("too many return values"))?;
+    for i in 1..=len {
+        mv.push_back(t.raw_get::<Value>(i)?);
+    }
+    Ok(mv)
+}
+
+async fn channel_recv(lua: Lua, inner: Arc<ChannelInner>) -> mlua::Result<MultiValue> {
+    // Serialize recv() across multiple consumers via async mutex.
+    let mut rx = inner.rx.lock().await;
+    let msg = rx.recv().await;
+    drop(rx);
+
+    match msg {
+        Some(key) => {
+            let v: Value = lua.registry_value(&key)?;
+            lua.remove_registry_value(key)?;
+            Ok(mv1(&lua, v))
+        }
+        None => Ok(mv2(&lua, Value::Nil, Value::String(lua.create_string("closed")?))),
+    }
 }
 
 #[derive(Debug)]
 struct Task {
     rx: Option<oneshot::Receiver<mlua::Result<RegistryKey>>>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    abort_on_drop: bool,
 }
 
 impl Drop for Task {
     fn drop(&mut self) {
         // Structured concurrency default: if user drops the handle,
         // the task should not outlive the script.
-        if let Some(h) = self.handle.take() {
+        if let Some(h) = self.handle.take()
+            && self.abort_on_drop
+        {
             h.abort();
         }
+        // Otherwise, dropping the JoinHandle detaches the task.
     }
 }
 
@@ -64,34 +102,10 @@ impl UserData for Task {
             Ok(true)
         });
 
-        methods.add_async_method_mut("join", |lua, mut this, ()| async move {
-            let rx = this
-                .rx
-                .take()
-                .ok_or_else(|| mlua::Error::external("task already joined"))?;
-
-            // Await completion.
-            let Ok(res) = rx.await else {
-                // Sender dropped without sending: cancelled/aborted.
-                return Err(mlua::Error::external("cancelled"));
-            };
-
-            // The join handle may still exist if the producer finished quickly;
-            // we can drop it now.
-            this.handle.take();
-
-            let key = res?;
-
-            // Materialize return values from registry table.
-            let t: mlua::Table = lua.registry_value(&key)?;
-            lua.remove_registry_value(key)?;
-
-            let mut mv = MultiValue::new();
-            let len = i64::try_from(t.raw_len()).map_err(|_| mlua::Error::external("too many return values"))?;
-            for i in 1..=len {
-                mv.push_back(t.raw_get::<Value>(i)?);
-            }
-            Ok(mv)
+        methods.add_async_method_mut("wait", |lua, mut this, ()| async move { task_join(lua, &mut this).await });
+        methods.add_method_mut("detach", |_, this, ()| {
+            this.abort_on_drop = false;
+            Ok(true)
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("Task()".to_string()));
@@ -118,24 +132,14 @@ impl Drop for Channel {
             *txg = None;
         }
 
-        // Drain any queued registry values to avoid leaks. If the receiver is currently locked
-        // by an in-flight `recv()`, schedule a local drain once the lock becomes available.
+        // Best-effort drain of queued registry values to avoid leaks.
+        // If the receiver is currently locked by an in-flight `recv()`, we skip draining here.
+        // (Scheduling a drain from `Drop` via `spawn_local` is not safe; it can panic outside a LocalSet.)
         if let Ok(mut rx) = self.inner.rx.try_lock() {
             while let Ok(key) = rx.try_recv() {
                 let _ = self.lua.remove_registry_value(key);
             }
-            return;
         }
-
-        let inner = self.inner.clone();
-        let lua = self.lua.clone();
-        #[allow(clippy::let_underscore_future)]
-        let _ = tokio::task::spawn_local(async move {
-            let mut rx = inner.rx.lock().await;
-            while let Ok(key) = rx.try_recv() {
-                let _ = lua.remove_registry_value(key);
-            }
-        });
     }
 }
 
@@ -195,28 +199,14 @@ impl UserData for Channel {
             }
         });
 
-        methods.add_async_method("recv", |lua, this, ()| {
+        methods.add_async_method("wait", |lua, this, ()| {
             let inner = this.inner.clone();
-            async move {
-                // Serialize recv() across multiple consumers via async mutex.
-                let mut rx = inner.rx.lock().await;
-                let msg = rx.recv().await;
-                drop(rx);
-
-                match msg {
-                    Some(key) => {
-                        let v: Value = lua.registry_value(&key)?;
-                        lua.remove_registry_value(key)?;
-                        Ok(mv1(&lua, v))
-                    }
-                    None => Ok(mv2(&lua, Value::Nil, Value::String(lua.create_string("closed")?))),
-                }
-            }
+            async move { channel_recv(lua, inner).await }
         });
 
         methods.add_method("try_recv", |lua, this, ()| {
             let Ok(mut rx) = this.inner.rx.try_lock() else {
-                // Someone is currently awaiting recv(); report as "busy".
+                // Someone is currently awaiting wait(); report as "busy".
                 return Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("busy")?)));
             };
             match rx.try_recv() {
@@ -401,6 +391,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             lua.create_userdata(Task {
                 rx: Some(rx),
                 handle: Some(handle),
+                abort_on_drop: true,
             })
         })?,
     )?;
@@ -422,29 +413,14 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     // Convenience: async.await(awaitable)
-    // Supports `wait()` or calling userdata directly (same semantics as time.timeout uses).
+    // Contract: awaitable is a userdata with `wait()` (preferred) or `__call()`.
     t.set(
         "await",
-        lua.create_async_function(|_lua, awaitable: AnyUserData| async move {
-            if let Ok(wait_fn) = awaitable.get::<Function>("wait") {
-                return wait_fn.call_async::<MultiValue>((awaitable.clone(),)).await;
-            }
-
-            awaitable
-                .call_async::<MultiValue>(())
-                .await
-                .map_err(|_| mlua::Error::external("awaitable has neither wait() nor __call()"))
-        })?,
+        lua.create_async_function(|_lua, awaitable: AnyUserData| async move { await_userdata(awaitable).await })?,
     )?;
 
-    // async.select(list) -> idx, ...
-    // Races multiple awaitables concurrently and returns the first one that completes.
-    //
-    // The input is an array-like table of userdatas. For convenience, the following are
-    // supported:
-    // - Task userdata: awaited via :join()
-    // - Channel userdata: awaited via :recv()
-    // - Any awaitable userdata: awaited via :wait() or __call (same idea as async.await)
+    // The input is an array-like table of userdatas.
+    // Contract: each entry must implement `wait()` (preferred) or `__call()`.
     t.set(
         "select",
         lua.create_async_function(|_, list: Table| async move {

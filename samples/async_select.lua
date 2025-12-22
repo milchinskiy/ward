@@ -17,7 +17,7 @@ local timer = time.sleep(tick_every) -- one-shot timer; we re-arm after it fires
 -- Producer: emit some messages on its own cadence, then close the channel.
 local producer = async.spawn(function()
 	for i = 1, 5 do
-		time.sleep(0.40)() -- awaitable sleep; `()` calls the awaitable
+		time.sleep(0.40):wait() -- awaitable sleep; `()` calls the awaitable
 		ch:send({ n = i, msg = "hello" })
 	end
 	ch:close()
@@ -31,13 +31,13 @@ while true do
 	local idx, a, b = async.select({ ch, timer })
 
 	if idx == 1 then
-		-- channel:recv() returns: msg OR nil, "closed"
+		-- channel:wait() returns: msg OR nil, "closed"
 		local msg, err = a, b
 		if not msg then
 			print("channel done:", err)
 			break
 		end
-		print("recv:", msg.n, msg.msg)
+		print("wait:", msg.n, msg.msg)
 	else
 		-- timer fired (sleep returns nothing); re-arm it
 		tick = tick + 1
@@ -46,5 +46,5 @@ while true do
 	end
 end
 
-producer:join()
+producer:wait()
 print("done")

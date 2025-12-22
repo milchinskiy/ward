@@ -22,7 +22,7 @@ local tasks = {}
 for wid = 1, WORKERS do
 	tasks[wid] = async.spawn(function()
 		while true do
-			local job, err = jobs:recv()
+			local job, err = jobs:wait()
 			if not job then
 				-- jobs channel closed/drained
 				break
@@ -73,7 +73,7 @@ end)
 -- Consumer: collect exactly JOBS results.
 -- (We collect results while workers run, to avoid blocking workers on a full results channel.)
 for _ = 1, JOBS do
-	local msg, err = results:recv()
+	local msg, err = results:wait()
 	if not msg then
 		error("results channel closed early: " .. tostring(err))
 	end
@@ -96,11 +96,11 @@ for _ = 1, JOBS do
 	end
 end
 
-producer:join()
+producer:wait()
 
 -- Wait for workers to finish (jobs is closed; they should exit promptly).
 for i = 1, WORKERS do
-	tasks[i]:join()
+	tasks[i]:wait()
 end
 
 results:close()

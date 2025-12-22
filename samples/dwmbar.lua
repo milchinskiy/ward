@@ -116,18 +116,18 @@ local date_task = start_interval("date", 1, function()
 end)
 
 require("ward.lifecycle").on_shutdown(function()
-    log.info("shutting down")
-    cpu_task:cancel()
-    mem_task:cancel()
-    bat_task:cancel()
-    date_task:cancel()
+	log.info("shutting down")
+	cpu_task:cancel()
+	mem_task:cancel()
+	bat_task:cancel()
+	date_task:cancel()
 end)
 
 -- --- Renderer loop ---
 -- Update bar whenever we receive any update.
--- (No select needed: we just block on updates:recv().)
+-- (No select needed: we just block on updates:wait().)
 while true do
-	local msg, err = updates:recv()
+	local msg, err = updates:wait()
 	if not msg then
 		-- Should not happen unless channel is closed
 		break
@@ -137,5 +137,5 @@ while true do
 	set_root_name(render())
 end
 
--- If you ever add shutdown handling, you can cancel/join tasks here.
+-- If you ever add shutdown handling, you can cancel/wait tasks here.
 -- cpu_task:cancel(); mem_task:cancel(); bat_task:cancel(); date_task:cancel()

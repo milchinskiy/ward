@@ -40,7 +40,7 @@ for i = 1, workers do
 end
 
 for _ = 1, workers do
-	local msg, err = ch:recv()
+	local msg, err = ch:wait()
 	if not msg then
 		error("channel closed: " .. tostring(err))
 	end
@@ -61,7 +61,7 @@ for _ = 1, workers do
 end
 
 for i = 1, workers do
-	tasks[i]:join()
+	tasks[i]:wait()
 end
 
 ch:close()
