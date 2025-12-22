@@ -673,7 +673,39 @@ Closes the **sender** side of the channel.
 
 Important: `close()` does **not** discard queued items. Receivers can continue calling `recv()` until the channel is fully drained and then observe `nil, "closed"`.
 
-### 6.5.4 Examples
+### 6.5.4 Selecting across awaitables
+
+#### `async.select(list) -> idx, ...`
+
+Races multiple awaitables concurrently and returns the first one that completes.
+`list` must be an array-like table of **userdata awaitables**. For convenience, Ward also accepts:
+
+- `Task` userdata (waited via `:join()`)
+- `Channel` userdata (waited via `:recv()`)
+
+The return value is:
+
+- `idx` — the **1-based** index into `list` that completed first
+- followed by that awaitable’s return values
+
+Note: `async.select` cancels the non-winning internal waiters. This is generally what you want for a “race”. If you pass `Task` handles, the losing tasks may be aborted if they are dropped/cancelled as a result.
+
+Example: race a task against a timeout
+
+```lua
+local async = require("ward.async")
+local time = require("ward.time")
+
+local t = async.spawn(function()
+  time.sleep(0.2)()
+  return "task"
+end)
+
+local idx, v = async.select({ t, time.sleep(0.05) })
+print("winner", idx, v)
+```
+
+### 6.5.5 Examples
 
 #### Fan-out / fan-in
 
@@ -1181,7 +1213,7 @@ local res = retry.run(function()
     ...
 end, { attempts = 5, delay_ms = 200, backoff = 2.0, jitter = true })
 
-+print("ok:", res.status)
+print("ok:", res.status)
 ```
 
 ---

@@ -1,11 +1,38 @@
 #![allow(clippy::unnecessary_wraps)]
 
+use futures_util::future::poll_fn;
 use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, RegistryKey, Table, UserData, UserDataMethods,
     Value, Variadic,
 };
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::Poll;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
+
+async fn await_userdata(ud: AnyUserData) -> mlua::Result<MultiValue> {
+    // Convenience: let users pass Task or Channel directly.
+    // This is needed for `async.select`, because calling `t:join()` / `ch:recv()` in Lua would
+    // eagerly await the first operation and prevent concurrent waiting.
+    if let Ok(join_fn) = ud.get::<Function>("join") {
+        return join_fn.call_async::<MultiValue>((ud.clone(),)).await;
+    }
+
+    if let Ok(recv_fn) = ud.get::<Function>("recv") {
+        return recv_fn.call_async::<MultiValue>((ud.clone(),)).await;
+    }
+
+    // Prefer `wait()` for composability.
+    if let Ok(wait_fn) = ud.get::<Function>("wait") {
+        return wait_fn.call_async::<MultiValue>((ud.clone(),)).await;
+    }
+
+    // Fallback to calling the userdata itself (requires `MetaMethod::Call`).
+    ud.call_async::<MultiValue>(())
+        .await
+        .map_err(|_| mlua::Error::external("awaitable has neither join(), recv(), wait() nor __call()"))
+}
 
 #[derive(Debug)]
 struct Task {
@@ -407,6 +434,63 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 .call_async::<MultiValue>(())
                 .await
                 .map_err(|_| mlua::Error::external("awaitable has neither wait() nor __call()"))
+        })?,
+    )?;
+
+    // async.select(list) -> idx, ...
+    // Races multiple awaitables concurrently and returns the first one that completes.
+    //
+    // The input is an array-like table of userdatas. For convenience, the following are
+    // supported:
+    // - Task userdata: awaited via :join()
+    // - Channel userdata: awaited via :recv()
+    // - Any awaitable userdata: awaited via :wait() or __call (same idea as async.await)
+    t.set(
+        "select",
+        lua.create_async_function(|_, list: Table| async move {
+            let len_i64 = i64::try_from(list.raw_len()).map_err(|_| mlua::Error::external("too many awaitables"))?;
+            if len_i64 <= 0 {
+                return Err(mlua::Error::external("select expects a non-empty array table"));
+            }
+            let len = usize::try_from(len_i64).map_err(|_| mlua::Error::external("too many awaitables"))?;
+
+            // Build per-entry futures in the *current* task and poll them in list order.
+            // This avoids aborting a side-effecting await (e.g. Channel:recv) after it has
+            // already consumed input but before results are delivered to Lua.
+            let mut futs: Vec<Pin<Box<dyn Future<Output = mlua::Result<MultiValue>> + Send>>> = Vec::with_capacity(len);
+
+            for i in 1..=len_i64 {
+                let v: Value = list.raw_get(i)?;
+                let Value::UserData(ud) = v else {
+                    return Err(mlua::Error::external("select expects an array of userdata awaitables"));
+                };
+
+                // Each future awaits one awaitable and yields its MultiValue.
+                futs.push(Box::pin(async move { await_userdata(ud).await }));
+            }
+
+            // Biased selection: lowest index wins if multiple are ready in the same poll.
+            let (idx, res) = poll_fn(|cx| {
+                for (i, f) in futs.iter_mut().enumerate() {
+                    match f.as_mut().poll(cx) {
+                        Poll::Ready(r) => return Poll::Ready((i + 1, r)),
+                        Poll::Pending => {}
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+
+            let out = res?;
+
+            let mut mv = MultiValue::new();
+            mv.push_back(Value::Integer(
+                i64::try_from(idx).map_err(|_| mlua::Error::external("index overflow"))?,
+            ));
+            for v in out {
+                mv.push_back(v);
+            }
+            Ok(mv)
         })?,
     )?;
 
