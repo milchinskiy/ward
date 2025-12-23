@@ -1,4 +1,5 @@
 local p = require("ward.process")
+local log = require("ward.log")
 local str = require("ward.helpers.string")
 
 -- Demonstrates streaming stdout line-by-line from a long-running process.
@@ -20,7 +21,9 @@ print("watching pw-mon ...")
 while true do
 	local line, lerr = out:wait()
 	if not line then
-        require("ward.log").error(lerr)
+		if lerr ~= "eof" then
+			log.error(lerr)
+		end
 		break
 	end
 

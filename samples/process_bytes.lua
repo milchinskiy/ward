@@ -9,7 +9,8 @@ local p = require("ward.process")
 local child = p.cmd("sh", "-lc", "printf 'A\\0B'"):spawn({ stdout = true })
 local bytes = assert(child:stdout_bytes())
 
-local chunk, err = bytes:read(3)
+-- ByteStream is awaitable; :wait(n) reads up to n bytes.
+local chunk, err = bytes:wait(3)
 assert(chunk, err)
 
 print("len:", #chunk)

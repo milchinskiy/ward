@@ -473,8 +473,11 @@ local process = require("ward.process")
 
 Create a command.
 
+Arguments may be provided either as varargs or as a single array-table:
+
 ```lua
-local cmd = process.cmd("git", "status", "--porcelain")
+local a = process.cmd("git", "status", "--porcelain")
+local b = process.cmd("git", { "status", "--porcelain" })
 ```
 
 #### `process.sh(script) -> Cmd`
@@ -525,12 +528,14 @@ Builder methods (fluent):
 - `cmd:timeout(ms) -> Cmd`
 - `cmd:stdin(data) -> Cmd` (bytes string)
 - `cmd:stdin_file(path) -> Cmd`
+- `cmd:stdin_null() -> Cmd`
 - `cmd:stderr_to_stdout(true|false) -> Cmd`
 - `cmd:spawn(opts?) -> ProcChild`
 
 Notes:
 
 - `cmd:stdin(...)` / `cmd:stdin_file(...)` are **one-shot** stdin configuration for `run/output/spawn` and will be written then closed when spawning.
+- `cmd:stdin_null()` sets stdin to a closed stream (equivalent to shell `< /dev/null`).
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
 
 Terminal operations:
@@ -560,19 +565,26 @@ Spawns a long-running child process and returns a `ProcChild` handle. This is us
 
 `opts` is an optional table:
 
-- `stdin`  (boolean or `"pipe"|"inherit"`)
+- `stdin`  (boolean or `"pipe"|"inherit"|"null"`)
   - `true` / `"pipe"`: pipe stdin so Lua can write via `ProcChild:stdin()`
   - `false` / `"inherit"`: inherit parent stdin
+  - `"null"`: connect stdin to a closed stream
   - Default: inferred. If `cmd:stdin(...)` / `cmd:stdin_file(...)` was used, Ward will pipe stdin to feed the data. Otherwise it typically inherits unless you request piping.
-- `stdout` (boolean or `"pipe"|"inherit"`, default `true`)
+
+- `stdout` (boolean or `"pipe"|"inherit"|"null"`, default `true`)
   - `true` / `"pipe"`: pipe stdout so you can stream it
   - `false` / `"inherit"`: inherit parent stdout
-- `stderr` (boolean or `"pipe"|"inherit"`)
+  - `"null"`: discard stdout
+
+- `stderr` (boolean or `"pipe"|"inherit"|"null"`)
+  - `true` / `"pipe"`: pipe stderr so you can stream it
+  - `false` / `"inherit"`: inherit parent stderr
+  - `"null"`: discard stderr
   - Default: `true` when `cmd:stderr_to_stdout(true)` is set, otherwise implementation-defined.
 
 Important:
 
-- If you call `cmd:stderr_to_stdout(true)`, Ward merges stderr into the stdout stream (similar to `2>&1`). In this case, stderr is not available separately and must be read from stdout.
+- If you call `cmd:stderr_to_stdout(true)`, Ward merges stderr into the stdout stream (similar to `2>&1`). In this case, stderr is not available separately and must be read from stdout. Ordering is best-effort and may not exactly match OS-level `2>&1` interleaving.
 - If you configure stdin via `cmd:stdin(...)` / `cmd:stdin_file(...)`, Ward will write the configured input and then **close** stdin (one-shot). For interactive stdin, do not set `cmd:stdin(...)`; instead use `spawn({ stdin = true })` and then write via `ProcChild:stdin()`.
 
 Example (spawn + line streaming):
@@ -668,12 +680,17 @@ Returned by `ProcChild:stdout_bytes()` or `ProcChild:stderr_bytes()`.
 
 Methods:
 
-- `stream:read(n?) -> bytes | nil, err`
+- `stream:wait(n?) -> bytes | nil, err`
   - `n` defaults to 16384
   - returns a **bytes string** (binary-safe; may contain `\\0`)
   - `err` is `"eof"` when the stream ends.
 
-Note: `ByteStream` uses `read(...)` (not `wait()`), so it is not directly compatible with `async.select(...)` unless wrapped in a task.
+Aliases:
+
+- `stream:read(n?)` is the same as `stream:wait(n?)`.
+- `stream(n?)` calls `stream:wait(n?)`.
+
+This object follows Ward’s “awaitable” contract, so it can be used with `async.select(...)`.
 
 Example (bytes):
 
@@ -682,7 +699,7 @@ local p = require("ward.process")
 
 local child = p.cmd("sh", "-lc", "printf 'A\\0B'"):spawn({ stdout = true })
 local bs = assert(child:stdout_bytes())
-local chunk, err = bs:read(3)
+local chunk, err = bs:wait(3)
 assert(chunk, err)
 
 print("len:", #chunk)
@@ -696,12 +713,16 @@ child:wait()
 Builder methods:
 
 - `pl:pipefail(true|false) -> Pipeline` — if true, pipeline ok requires all steps succeed
+- `pl:timeout(ms) -> Pipeline`
 - `pl:pipe(cmd_or_pipeline) -> Pipeline`
 
 Terminal operations:
 
 - `pl:run() -> CmdResult`
 - `pl:output() -> CmdResult`
+- `pl:spawn(opts?) -> ProcChild`
+
+`pl:spawn(opts?)` starts the pipeline and returns a `ProcChild` for streaming. The returned child refers to the **last stage** in the pipeline; use `child:pids()` to get all stage PIDs.
 
 Operator:
 
