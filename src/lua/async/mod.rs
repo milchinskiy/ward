@@ -146,8 +146,6 @@ impl Drop for Channel {
 impl UserData for Channel {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_async_method("send", |lua, this, v: Value| {
-            // Copy sender handle without borrowing userdata across await.
-            // Use a Result so we can surface mutex poisoning consistently.
             let tx_res = this
                 .inner
                 .tx
@@ -163,14 +161,14 @@ impl UserData for Channel {
                     return Ok(mv2(&lua, Value::Nil, closed));
                 };
 
+                let permit = tx
+                    .reserve()
+                    .await
+                    .map_err(|_| mlua::Error::RuntimeError("channel is closed".into()))?;
                 let key = lua.create_registry_value(v)?;
-                match tx.send(key).await {
-                    Ok(()) => Ok(mv1(&lua, Value::Boolean(true))),
-                    Err(e) => {
-                        lua.remove_registry_value(e.0)?;
-                        Ok(mv2(&lua, Value::Nil, closed))
-                    }
-                }
+                permit.send(key);
+
+                Ok(mv1(&lua, Value::Boolean(true)))
             }
         });
 

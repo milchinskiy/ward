@@ -11,7 +11,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     let console = super::console::console(lua);
 
-    // read_all(opts?): async -> String
+    // read_all(opts?): async -> bytes string
     // opts can be:
     //   - nil / omitted: unlimited
     //   - number/integer: max_bytes
@@ -37,15 +37,13 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                         guard.read_to_end(&mut buf).await.map_err(mlua::Error::external)?;
                     }
                     drop(guard);
-
-                    let s = String::from_utf8(buf).map_err(mlua::Error::external)?;
-                    Ok(s)
+                    Ok(buf)
                 }
             }
         })?,
     )?;
 
-    // read_line(): async -> string|nil
+    // read_line(): async -> bytes string|nil
     // Returns nil on EOF. Strips trailing "\n" and optional "\r".
     table.set(
         "read_line",
@@ -55,17 +53,20 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 let console = console.clone();
                 async move {
                     let mut guard = console.stdin.lock().await;
-                    let mut line = String::new();
-                    let bytes = guard.read_line(&mut line).await.map_err(mlua::Error::external)?;
+                    let mut line: Vec<u8> = Vec::new();
+                    let bytes = guard
+                        .read_until(b'\n', &mut line)
+                        .await
+                        .map_err(mlua::Error::external)?;
                     drop(guard);
 
                     if bytes == 0 {
-                        return Ok::<Option<String>, mlua::Error>(None);
+                        return Ok::<Option<Vec<u8>>, mlua::Error>(None);
                     }
 
-                    if line.ends_with('\n') {
+                    if line.ends_with(b"\n") {
                         line.pop();
-                        if line.ends_with('\r') {
+                        if line.ends_with(b"\r") {
                             line.pop();
                         }
                     }
@@ -90,11 +91,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         "write_stdout",
         lua.create_async_function({
             let console = console.clone();
-            move |_lua, text: String| {
+            move |_lua, text: mlua::String| {
                 let console = console.clone();
                 async move {
                     let mut out = console.stdout.lock().await;
-                    out.write_all(text.as_bytes()).await.map_err(mlua::Error::external)?;
+                    out.write_all(&text.as_bytes()).await.map_err(mlua::Error::external)?;
                     drop(out);
                     Ok(true)
                 }
@@ -107,11 +108,11 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         "write_stderr",
         lua.create_async_function({
             let console = console.clone();
-            move |_lua, text: String| {
+            move |_lua, text: mlua::String| {
                 let console = console.clone();
                 async move {
                     let mut err = console.stderr.lock().await;
-                    err.write_all(text.as_bytes()).await.map_err(mlua::Error::external)?;
+                    err.write_all(&text.as_bytes()).await.map_err(mlua::Error::external)?;
                     drop(err);
                     Ok(true)
                 }
@@ -161,17 +162,17 @@ fn read_lines(lua: &Lua, console: Arc<super::console::Console>) -> mlua::Result<
         let console = Arc::clone(&console);
         async move {
             let mut guard = console.stdin.lock().await;
-            let mut line = String::new();
-            let bytes = guard.read_line(&mut line).await.map_err(mlua::Error::external)?;
+            let mut line: Vec<u8> = Vec::new();
+            let bytes = guard.read_until(b'\n', &mut line).await.map_err(mlua::Error::external)?;
             drop(guard);
 
             if bytes == 0 {
-                return Ok::<Option<String>, mlua::Error>(None);
+                return Ok::<Option<Vec<u8>>, mlua::Error>(None);
             }
 
-            if line.ends_with('\n') {
+            if line.ends_with(b"\n") {
                 line.pop();
-                if line.ends_with('\r') {
+                if line.ends_with(b"\r") {
                     line.pop();
                 }
             }

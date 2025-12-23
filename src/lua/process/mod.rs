@@ -99,8 +99,8 @@ impl UserData for LineStream {
             let inner = this.inner.clone();
             async move {
                 let mut guard = inner.lock().await;
-                let mut line = String::new();
-                match guard.read_line(&mut line).await {
+                let mut line: Vec<u8> = Vec::new();
+                match guard.read_until(b'\n', &mut line).await {
                     Ok(0) => {
                         let mut mv = MultiValue::new();
                         mv.push_back(Value::Nil);
@@ -109,11 +109,11 @@ impl UserData for LineStream {
                     }
                     Ok(_) => {
                         // Drop trailing newline(s) only.
-                        while line.ends_with('\n') || line.ends_with('\r') {
+                        while line.ends_with(b"\n") || line.ends_with(b"\r") {
                             line.pop();
                         }
                         let mut mv = MultiValue::new();
-                        mv.push_back(Value::String(lua.create_string(line.as_bytes())?));
+                        mv.push_back(Value::String(lua.create_string(line.as_slice())?));
                         Ok(mv)
                     }
                     Err(e) => {
@@ -158,7 +158,8 @@ impl UserData for ByteStream {
                 }
 
                 let mut guard = inner.lock().await;
-                let mut buf = vec![0_u8; usize::try_from(n).unwrap_or(0)];
+                let n = usize::try_from(n).map_err(|_| mlua::Error::RuntimeError("read(n): n is too large".into()))?;
+                let mut buf = vec![0_u8; n];
                 match guard.read(&mut buf).await {
                     Ok(0) => {
                         let mut mv = MultiValue::new();

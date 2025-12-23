@@ -66,7 +66,7 @@ end
 ## 2. Conventions used in this guide
 
 - `nil|string` means the function returns either `nil` or a Lua string.
-- “bytes string” means a Lua string whose contents are raw bytes (binary-safe).
+- "bytes string" means a Lua string whose contents are raw bytes (binary-safe).
 - Paths are typically accepted as strings (and in most ward.fs APIs also as ward.fs.path objects).
 - Most option tables are optional; when omitted, defaults apply.
 
@@ -76,7 +76,7 @@ end
 
 Ward uses an environment overlay:
 
-- `env.set` / `env.unset` / `env.clear` modify Ward’s overlay only (they do not mutate the process-global OS environment).
+- `env.set` / `env.unset` / `env.clear` modify Ward's overlay only (they do not mutate the process-global OS environment).
 - Read operations (`env.get` / `env.list` / `env.is_exists` / `env.which` / `env.is_in_path`) resolve the effective environment: the process environment plus overlay modifications (overlay wins).
 - The overlay is applied to child processes spawned via `ward.process` and to the git invocations used by `ward.net.fetch.git`.
 For child processes, precedence is: process env → Ward overlay → per-command overrides (Cmd:env / Cmd:envs).
@@ -114,7 +114,7 @@ Remove an environment variable (from the overlay).
 env.unset("FOO")
 ```
 
-### 3.4 `env.clear() -> true`
+### 3.4 `env.clear() -> nil`
 
 Clears all overlay modifications (restores the effective environment back to the base process environment).
 
@@ -406,7 +406,7 @@ local io = require("ward.io")
 
 Ward serializes reads/writes with internal mutexes so concurrent operations do not interleave unpredictably.
 
-### 5.1 `io.read_all(opts?) -> string`
+### 5.1 `io.read_all(opts?) -> bytes string`
 
 Reads all remaining stdin into a string.
 
@@ -421,7 +421,7 @@ local s = io.read_all()
 local s2 = io.read_all({ max_bytes = 1024 * 1024 })
 ```
 
-### 5.2 `io.read_line() -> string|nil`
+### 5.2 `io.read_line() -> byts string|nil`
 
 Reads one line from stdin.
 
@@ -435,7 +435,7 @@ print("got:", line)
 
 ### 5.3 `io.read_lines() -> function`
 
-Returns an iterator-like function. Each call reads one line from stdin and returns `string|nil` (nil on EOF).
+Returns an iterator-like function. Each call reads one line from stdin and returns `bytes string|nil` (nil on EOF).
 
 ```lua
 local next_line = io.read_lines()
