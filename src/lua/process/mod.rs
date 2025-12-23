@@ -1,21 +1,20 @@
+#![allow(clippy::missing_const_for_fn)]
+
 use mlua::{
     Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
 };
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     fs,
-    io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex as AsyncMutex,
+    task::JoinHandle,
     time,
 };
 
-type SharedReader = Arc<AsyncMutex<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send + 'static>>>>;
+type EnvOverlay = HashMap<String, Option<String>>;
+type BoxRead = Box<dyn AsyncRead + Unpin + Send + 'static>;
 
 #[derive(Clone, Default)]
 struct CmdSpec {
@@ -33,373 +32,21 @@ struct CmdSpec {
 enum StdinSpec {
     #[default]
     Inherit,
+    Null,
     Bytes(Vec<u8>),
     File(PathBuf),
 }
 
 #[derive(Clone)]
 struct Cmd {
-    // Shared builder state: cloning `Cmd` keeps a handle to the *same* spec.
-    // This preserves Lua chaining semantics without copying the full object.
-    spec: Arc<Mutex<CmdSpec>>,
+    spec: CmdSpec,
 }
 
 #[derive(Clone)]
 struct Pipeline {
-    // Shared pipeline state for fluent mutation (e.g. :pipefail()).
-    inner: Arc<Mutex<PipelineState>>,
-}
-
-#[derive(Clone)]
-struct PipelineState {
     specs: Vec<CmdSpec>,
     pipefail: bool,
-}
-
-impl Cmd {
-    fn new(spec: CmdSpec) -> Self {
-        Self {
-            spec: Arc::new(Mutex::new(spec)),
-        }
-    }
-
-    fn snapshot(&self) -> CmdSpec {
-        self.spec
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-impl Pipeline {
-    fn new(specs: Vec<CmdSpec>, pipefail: bool) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(PipelineState { specs, pipefail })),
-        }
-    }
-
-    fn snapshot(&self) -> (Vec<CmdSpec>, bool) {
-        let st = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        (st.specs.clone(), st.pipefail)
-    }
-}
-
-#[derive(Clone)]
-struct LineStream {
-    // Serialized line reads.
-    inner: SharedReader,
-}
-
-impl UserData for LineStream {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // Await the next line from the stream.
-        // Returns: line | nil, err
-        // err is "eof" when the stream ends.
-        methods.add_async_method("wait", |lua, this, ()| {
-            let inner = this.inner.clone();
-            async move {
-                let mut guard = inner.lock().await;
-                let mut line: Vec<u8> = Vec::new();
-                match guard.read_until(b'\n', &mut line).await {
-                    Ok(0) => {
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::Nil);
-                        mv.push_back(Value::String(lua.create_string("eof")?));
-                        Ok(mv)
-                    }
-                    Ok(_) => {
-                        // Drop trailing newline(s) only.
-                        while line.ends_with(b"\n") || line.ends_with(b"\r") {
-                            line.pop();
-                        }
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::String(lua.create_string(line.as_slice())?));
-                        Ok(mv)
-                    }
-                    Err(e) => {
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::Nil);
-                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
-                        Ok(mv)
-                    }
-                }
-            }
-        });
-
-        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("LineStream()".to_string()));
-    }
-}
-
-#[derive(Clone)]
-struct ByteStream {
-    // Serialized chunk reads.
-    inner: SharedReader,
-}
-
-impl ByteStream {
-    fn from_shared(inner: SharedReader) -> Self {
-        Self { inner }
-    }
-}
-
-impl UserData for ByteStream {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // Await the next chunk from the stream.
-        //
-        // bytes:read(n?) -> chunk | nil, err
-        // - n defaults to 16384
-        // - err is "eof" when the stream ends
-        methods.add_async_method("read", |lua, this, n: Option<i64>| {
-            let inner = this.inner.clone();
-            async move {
-                let n = n.unwrap_or(16 * 1024);
-                if n <= 0 {
-                    return Err(mlua::Error::RuntimeError("read(n): n must be > 0".into()));
-                }
-
-                let mut guard = inner.lock().await;
-                let n = usize::try_from(n).map_err(|_| mlua::Error::RuntimeError("read(n): n is too large".into()))?;
-                let mut buf = vec![0_u8; n];
-                match guard.read(&mut buf).await {
-                    Ok(0) => {
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::Nil);
-                        mv.push_back(Value::String(lua.create_string("eof")?));
-                        Ok(mv)
-                    }
-                    Ok(sz) => {
-                        buf.truncate(sz);
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::String(lua.create_string(&buf)?));
-                        Ok(mv)
-                    }
-                    Err(e) => {
-                        let mut mv = MultiValue::new();
-                        mv.push_back(Value::Nil);
-                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
-                        Ok(mv)
-                    }
-                }
-            }
-        });
-
-        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ByteStream()".to_string()));
-    }
-}
-
-#[derive(Clone)]
-struct ProcStdin {
-    // A piped stdin handle that can be written to from Lua.
-    inner: Arc<AsyncMutex<Option<ChildStdin>>>,
-}
-
-impl ProcStdin {
-    fn new(w: ChildStdin) -> Self {
-        Self {
-            inner: Arc::new(AsyncMutex::new(Some(w))),
-        }
-    }
-}
-
-impl UserData for ProcStdin {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // stdin:write("...") -> true | nil, err
-        methods.add_async_method("write", |lua, this, data: Value| {
-            let inner = this.inner.clone();
-            // Copy bytes synchronously (do not hold Lua values across await).
-            let bytes_res: LuaResult<Vec<u8>> = match data {
-                Value::String(s) => Ok(s.as_bytes().to_vec()),
-                _ => Err(mlua::Error::RuntimeError("stdin:write(data): data must be a string".into())),
-            };
-
-            async move {
-                let bytes = bytes_res?;
-                let mut guard = inner.lock().await;
-                let Some(w) = guard.as_mut() else {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string("closed")?));
-                    return Ok(mv);
-                };
-                if let Err(e) = w.write_all(&bytes).await {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
-                    return Ok(mv);
-                }
-                drop(guard);
-                let mut mv = MultiValue::new();
-                mv.push_back(Value::Boolean(true));
-                Ok(mv)
-            }
-        });
-
-        // stdin:writeln("...") -> true | nil, err
-        methods.add_async_method("writeln", |lua, this, s: mlua::String| {
-            let inner = this.inner.clone();
-            let mut bytes = s.as_bytes().to_vec();
-            bytes.push(b'\n');
-            async move {
-                let mut guard = inner.lock().await;
-                let Some(w) = guard.as_mut() else {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string("closed")?));
-                    return Ok(mv);
-                };
-                if let Err(e) = w.write_all(&bytes).await {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
-                    return Ok(mv);
-                }
-                drop(guard);
-                let mut mv = MultiValue::new();
-                mv.push_back(Value::Boolean(true));
-                Ok(mv)
-            }
-        });
-
-        methods.add_async_method("flush", |lua, this, ()| {
-            let inner = this.inner.clone();
-            async move {
-                let mut guard = inner.lock().await;
-                let Some(w) = guard.as_mut() else {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string("closed")?));
-                    return Ok(mv);
-                };
-                if let Err(e) = w.flush().await {
-                    let mut mv = MultiValue::new();
-                    mv.push_back(Value::Nil);
-                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
-                    return Ok(mv);
-                }
-                drop(guard);
-                let mut mv = MultiValue::new();
-                mv.push_back(Value::Boolean(true));
-                Ok(mv)
-            }
-        });
-
-        // stdin:close() -> true
-        methods.add_async_method("close", |_, this, ()| {
-            let inner = this.inner.clone();
-            async move {
-                inner.lock().await.take();
-                Ok(true)
-            }
-        });
-
-        methods.add_async_method("is_closed", |_, this, ()| {
-            let inner = this.inner.clone();
-            async move {
-                let guard = inner.lock().await;
-                Ok(guard.is_none())
-            }
-        });
-
-        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcStdin()".to_string()));
-    }
-}
-
-#[derive(Clone)]
-struct ProcChild {
-    pid: i64,
-    child: Arc<AsyncMutex<Child>>,
-    stdin: Option<ProcStdin>,
-    stdout: Option<SharedReader>,
-    stderr: Option<SharedReader>,
-}
-
-impl UserData for ProcChild {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("pid", |_, this, ()| Ok(this.pid));
-
-        methods.add_method("stdin", |lua, this, ()| {
-            let mut mv = MultiValue::new();
-            if let Some(s) = &this.stdin {
-                mv.push_back(Value::UserData(lua.create_userdata(s.clone())?));
-            } else {
-                mv.push_back(Value::Nil);
-                mv.push_back(Value::String(lua.create_string("not_piped")?));
-            }
-            Ok(mv)
-        });
-
-        methods.add_method("stdout_lines", |lua, this, ()| {
-            let mut mv = MultiValue::new();
-            if let Some(r) = &this.stdout {
-                mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: r.clone() })?));
-            } else {
-                mv.push_back(Value::Nil);
-                mv.push_back(Value::String(lua.create_string("not_piped")?));
-            }
-            Ok(mv)
-        });
-
-        methods.add_method("stdout_bytes", |lua, this, ()| {
-            let mut mv = MultiValue::new();
-            if let Some(r) = &this.stdout {
-                mv.push_back(Value::UserData(lua.create_userdata(ByteStream::from_shared(r.clone()))?));
-            } else {
-                mv.push_back(Value::Nil);
-                mv.push_back(Value::String(lua.create_string("not_piped")?));
-            }
-            Ok(mv)
-        });
-
-        methods.add_method("stderr_lines", |lua, this, ()| {
-            let mut mv = MultiValue::new();
-            if let Some(r) = &this.stderr {
-                mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: r.clone() })?));
-            } else {
-                mv.push_back(Value::Nil);
-                mv.push_back(Value::String(lua.create_string("not_piped")?));
-            }
-            Ok(mv)
-        });
-
-        methods.add_method("stderr_bytes", |lua, this, ()| {
-            let mut mv = MultiValue::new();
-            if let Some(r) = &this.stderr {
-                mv.push_back(Value::UserData(lua.create_userdata(ByteStream::from_shared(r.clone()))?));
-            } else {
-                mv.push_back(Value::Nil);
-                mv.push_back(Value::String(lua.create_string("not_piped")?));
-            }
-            Ok(mv)
-        });
-
-        methods.add_async_method("kill", |_, this, ()| {
-            let child = this.child.clone();
-            async move {
-                let mut ch = child.lock().await;
-                Ok(ch.kill().await.is_ok())
-            }
-        });
-
-        methods.add_async_method("wait", |_, this, ()| {
-            let child = this.child.clone();
-            async move {
-                let mut ch = child.lock().await;
-                let status = ch.wait().await.map_err(mlua::Error::external)?;
-                drop(ch);
-                let (code, signal) = normalize_status(status);
-                Ok(CmdResult {
-                    ok: code == 0,
-                    code,
-                    signal,
-                    stdout: None,
-                    stderr: None,
-                    steps: vec![code],
-                })
-            }
-        });
-
-        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcChild()".to_string()));
-    }
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -409,8 +56,61 @@ struct CmdResult {
     signal: Option<i64>,
     stdout: Option<Vec<u8>>,
     stderr: Option<Vec<u8>>,
-    // optional: per-step codes (useful for debugging)
     steps: Vec<i64>,
+}
+
+type SharedReader = Arc<AsyncMutex<BufReader<BoxRead>>>;
+
+#[derive(Clone)]
+struct LineStream {
+    inner: SharedReader,
+}
+
+#[derive(Clone)]
+struct ByteStream {
+    inner: SharedReader,
+}
+
+#[derive(Clone)]
+struct ProcStdin {
+    inner: Arc<AsyncMutex<Option<ChildStdin>>>,
+}
+
+#[derive(Clone)]
+struct ProcChild {
+    inner: Arc<AsyncMutex<ProcState>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamMode {
+    Lines,
+    Bytes,
+}
+
+struct ProcState {
+    pipefail: bool,
+    timeout_ms: Option<u64>,
+    children: Vec<Child>,
+    pids: Vec<i64>,
+
+    // Raw handles. These are kept until the user asks for a stream.
+    stdin_raw: Option<ChildStdin>,
+    stdout_raw: Option<BoxRead>,
+    stderr_raw: Option<BoxRead>,
+    stderr_merged: bool,
+
+    // Once a stream is requested, we materialize a shared reader and remember which mode was chosen.
+    stdout_reader: Option<SharedReader>,
+    stderr_reader: Option<SharedReader>,
+    stdout_mode: Option<StreamMode>,
+    stderr_mode: Option<StreamMode>,
+
+    // Background tasks:
+    // - pipe pumps (stdout(i)->stdin(i+1), plus optional stderr pumps)
+    // - optional stderr->stdout drain in inherit mode for last command
+    // - optional stdin feeder for one-shot stdin
+    link_tasks: Vec<JoinHandle<()>>,
+    aux_tasks: Vec<JoinHandle<()>>,
 }
 
 impl UserData for CmdResult {
@@ -419,16 +119,16 @@ impl UserData for CmdResult {
         fields.add_field_method_get("code", |_, this| Ok(this.code));
         fields.add_field_method_get("signal", |_, this| Ok(this.signal));
         fields.add_field_method_get("stdout", |lua, this| {
-            Ok(match &this.stdout {
-                Some(b) => Some(lua.create_string(b)?),
-                None => None,
-            })
+            this.stdout
+                .as_ref()
+                .map(|b| lua.create_string(b.as_slice()))
+                .transpose()
         });
         fields.add_field_method_get("stderr", |lua, this| {
-            Ok(match &this.stderr {
-                Some(b) => Some(lua.create_string(b)?),
-                None => None,
-            })
+            this.stderr
+                .as_ref()
+                .map(|b| lua.create_string(b.as_slice()))
+                .transpose()
         });
         fields.add_field_method_get("steps", |lua, this| {
             let t = lua.create_table()?;
@@ -447,184 +147,471 @@ impl UserData for CmdResult {
             }
             let m = msg.unwrap_or_else(|| "process failed".to_string());
             Err(mlua::Error::RuntimeError(format!(
-                "{} (code={}, signal={:?})",
-                m, this.code, this.signal
+                "{m} (code={}, signal={:?})",
+                this.code, this.signal
             )))
         });
     }
 }
 
+impl UserData for LineStream {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // stream:wait() -> line | nil, err
+        // err is "eof" when the stream ends.
+        methods.add_async_method("wait", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let mut buf = Vec::<u8>::new();
+                match guard.read_until(b'\n', &mut buf).await {
+                    Ok(0) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string("eof")?));
+                        Ok(mv)
+                    }
+                    Ok(_) => {
+                        while buf.ends_with(b"\n") || buf.ends_with(b"\r") {
+                            buf.pop();
+                        }
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::String(lua.create_string(buf.as_slice())?));
+                        Ok(mv)
+                    }
+                    Err(e) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                        Ok(mv)
+                    }
+                }
+            }
+        });
+
+        // Allow awaitable syntax: stream() == stream:wait()
+        methods.add_async_meta_method(MetaMethod::Call, |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let mut buf = Vec::<u8>::new();
+                match guard.read_until(b'\n', &mut buf).await {
+                    Ok(0) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string("eof")?));
+                        Ok(mv)
+                    }
+                    Ok(_) => {
+                        while buf.ends_with(b"\n") || buf.ends_with(b"\r") {
+                            buf.pop();
+                        }
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::String(lua.create_string(buf.as_slice())?));
+                        Ok(mv)
+                    }
+                    Err(e) => {
+                        let mut mv = MultiValue::new();
+                        mv.push_back(Value::Nil);
+                        mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                        Ok(mv)
+                    }
+                }
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("LineStream()".to_string()));
+    }
+}
+
+impl UserData for ByteStream {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // bytes:read(n?) -> chunk | nil, err
+        // - n defaults to 16384
+        // - err is "eof" when the stream ends
+        methods.add_async_method("read", |lua, this, n: Option<i64>| {
+            let inner = this.inner.clone();
+            async move { read_chunk(&lua, inner, n).await }
+        });
+
+        // Awaitable helper: bytes:wait() == bytes:read()
+        methods.add_async_method("wait", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { read_chunk(&lua, inner, None).await }
+        });
+
+        methods.add_async_meta_method(MetaMethod::Call, |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { read_chunk(&lua, inner, None).await }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ByteStream()".to_string()));
+    }
+}
+
+async fn read_chunk(lua: &Lua, inner: SharedReader, n: Option<i64>) -> LuaResult<MultiValue> {
+    let n = n.unwrap_or(16 * 1024);
+    if n <= 0 {
+        return Err(mlua::Error::RuntimeError("read(n): n must be > 0".into()));
+    }
+    let n = usize::try_from(n).map_err(|_| mlua::Error::RuntimeError("read(n): n is too large".into()))?;
+
+    let mut guard = inner.lock().await;
+    let mut buf = vec![0_u8; n];
+    match guard.read(&mut buf).await {
+        Ok(0) => {
+            let mut mv = MultiValue::new();
+            mv.push_back(Value::Nil);
+            mv.push_back(Value::String(lua.create_string("eof")?));
+            Ok(mv)
+        }
+        Ok(sz) => {
+            buf.truncate(sz);
+            let mut mv = MultiValue::new();
+            mv.push_back(Value::String(lua.create_string(buf.as_slice())?));
+            Ok(mv)
+        }
+        Err(e) => {
+            let mut mv = MultiValue::new();
+            mv.push_back(Value::Nil);
+            mv.push_back(Value::String(lua.create_string(e.to_string())?));
+            Ok(mv)
+        }
+    }
+}
+
+impl ProcStdin {
+    fn new(w: ChildStdin) -> Self {
+        Self {
+            inner: Arc::new(AsyncMutex::new(Some(w))),
+        }
+    }
+}
+
+impl UserData for ProcStdin {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_async_method("write", |lua, this, bytes: Value| {
+            let inner = this.inner.clone();
+            async move {
+                let Value::String(s) = bytes else {
+                    return Err(mlua::Error::RuntimeError("stdin:write(bytes): expected string".into()));
+                };
+
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+
+                if let Err(e) = w.write_all(s.as_bytes().as_ref()).await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        methods.add_async_method("writeln", |lua, this, s: String| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+
+                if let Err(e) = w.write_all(s.as_bytes().as_ref()).await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+                if let Err(e) = w.write_all(b"\n").await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        methods.add_async_method("flush", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut guard = inner.lock().await;
+                let Some(w) = guard.as_mut() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("closed")?));
+                    return Ok(mv);
+                };
+
+                if let Err(e) = w.flush().await {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string(e.to_string())?));
+                    return Ok(mv);
+                }
+
+                drop(guard);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::Boolean(true));
+                Ok(mv)
+            }
+        });
+
+        methods.add_async_method("close", |_, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                inner.lock().await.take();
+                Ok(true)
+            }
+        });
+
+        methods.add_method("is_closed", |_, this, ()| {
+            let guard = this.inner.blocking_lock();
+            Ok(guard.is_none())
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcStdin()".to_string()));
+    }
+}
+
+impl Cmd {
+    fn new(program: String, args: Vec<String>) -> Self {
+        Self {
+            spec: CmdSpec {
+                program,
+                args,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn snapshot(&self) -> CmdSpec {
+        self.spec.clone()
+    }
+}
+
 impl UserData for Cmd {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("cwd", |_, this, path: String| {
-            this.spec.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cwd = Some(PathBuf::from(path));
-            Ok(this.clone())
+        methods.add_method("cwd", |_, this, path: String| {
+            let mut spec = this.snapshot();
+            spec.cwd = Some(PathBuf::from(path));
+            Ok(Self { spec })
         });
 
-        methods.add_method_mut("env", |_, this, (k, v): (String, String)| {
-            this.spec
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .env
-                .insert(k, v);
-            Ok(this.clone())
+        methods.add_method("env", |_, this, (k, v): (String, String)| {
+            let mut spec = this.snapshot();
+            spec.env.insert(k, v);
+            Ok(Self { spec })
         });
 
-        methods.add_method_mut("envs", |_, this, t: Table| {
-            let mut spec = this.spec.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        methods.add_method("envs", |_, this, t: Table| {
+            let mut spec = this.snapshot();
             for pair in t.pairs::<Value, Value>() {
                 let (k, v) = pair?;
                 if let (Value::String(ks), Value::String(vs)) = (k, v) {
                     spec.env.insert(ks.to_str()?.to_string(), vs.to_str()?.to_string());
                 }
             }
-            drop(spec);
-            Ok(this.clone())
+            Ok(Self { spec })
         });
 
         #[allow(clippy::cast_sign_loss)]
-        methods.add_method_mut("timeout", |_, this, ms: i64| {
-            this.spec
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .timeout_ms = Some(ms.max(0) as u64);
-            Ok(this.clone())
+        methods.add_method("timeout", |_, this, ms: i64| {
+            let mut spec = this.snapshot();
+            spec.timeout_ms = Some(ms.max(0) as u64);
+            Ok(Self { spec })
         });
 
-        methods.add_method_mut("stdin", |_, this, data: Value| {
-            this.spec
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .stdin = match data {
+        methods.add_method("stdin", |_, this, v: Value| {
+            let mut spec = this.snapshot();
+            spec.stdin = match v {
                 Value::String(s) => StdinSpec::Bytes(s.as_bytes().to_vec()),
+                Value::UserData(_) | Value::Table(_) | Value::Function(_) => {
+                    return Err(mlua::Error::RuntimeError(
+                        "stdin(v): expected bytes string (or nil/false to reset)".into(),
+                    ));
+                }
                 _ => StdinSpec::Inherit,
             };
-            Ok(this.clone())
+            Ok(Self { spec })
         });
 
-        methods.add_method_mut("stdin_file", |_, this, path: String| {
-            this.spec
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .stdin = StdinSpec::File(PathBuf::from(path));
-            Ok(this.clone())
+        methods.add_method("stdin_file", |_, this, path: String| {
+            let mut spec = this.snapshot();
+            spec.stdin = StdinSpec::File(PathBuf::from(path));
+            Ok(Self { spec })
         });
 
-        methods.add_method_mut("stderr_to_stdout", |_, this, yes: Option<bool>| {
-            this.spec
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .stderr_to_stdout = yes.unwrap_or(true);
-            Ok(this.clone())
+        methods.add_method("stdin_null", |_, this, ()| {
+            let mut spec = this.snapshot();
+            spec.stdin = StdinSpec::Null;
+            Ok(Self { spec })
         });
 
-        // cmd:pipe(cmd_or_pipeline)
+        methods.add_method("stderr_to_stdout", |_, this, yes: Option<bool>| {
+            let mut spec = this.snapshot();
+            spec.stderr_to_stdout = yes.unwrap_or(true);
+            Ok(Self { spec })
+        });
+
         methods.add_method("pipe", |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
 
-        // terminal operations
         methods.add_async_method("run", |lua, this, ()| {
             let spec = this.snapshot();
-            let overlay = crate::lua::env::overlay_snapshot(&lua);
-            async move { run_pipeline(vec![spec], false, RunMode::Inherit, overlay?).await }
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                run_specs(vec![spec], false, RunMode::Inherit, overlay).await
+            }
         });
 
         methods.add_async_method("output", |lua, this, ()| {
             let spec = this.snapshot();
-            let overlay = crate::lua::env::overlay_snapshot(&lua);
-            async move { run_pipeline(vec![spec], false, RunMode::Capture, overlay?).await }
-        });
-
-        // Spawn a long-running child process and optionally expose stdin/stdout/stderr as async streams.
-        //
-        // cmd:spawn(opts?) -> ProcChild
-        // opts:
-        //   stdin  = true|false|"pipe"|"inherit"  (default: false, unless stdin() / stdin_file() was used)
-        //   stdout = true|false|"pipe"|"inherit"  (default: true)
-        //   stderr = true|false|"pipe"|"inherit"  (default: spec.stderr_to_stdout ? true : false)
-        //
-        // If cmd:stderr_to_stdout(true) is set, spawn() merges child stderr into the stdout stream.
-        methods.add_async_method("spawn", |lua, this, opts: Option<Table>| {
-            let spec = this.snapshot();
-
-            // Parse options synchronously (avoid holding Lua values across await).
             async move {
-                let mut stdin_piped = !matches!(spec.stdin, StdinSpec::Inherit);
-                let mut stdout_piped = true;
-                let mut stderr_piped = spec.stderr_to_stdout;
-                if let Some(t) = opts {
-                    stdin_piped = parse_stdio_opt(&t, "stdin", stdin_piped)?;
-                    stdout_piped = parse_stdio_opt(&t, "stdout", stdout_piped)?;
-                    stderr_piped = parse_stdio_opt(&t, "stderr", stderr_piped)?;
-                }
-
-                let overlay = crate::lua::env::overlay_snapshot(&lua);
-
-                spawn_cmd(spec, stdin_piped, stdout_piped, stderr_piped, overlay?).await
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                run_specs(vec![spec], false, RunMode::Capture, overlay).await
             }
         });
 
-        // cmd1 | cmd2
+        // cmd:spawn(opts?) -> ProcChild
+        methods.add_async_method("spawn", |lua, this, opts: Option<Table>| {
+            let spec = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                let cfg = SpawnCfg::from_lua(opts.as_ref(), &spec)?;
+                spawn_specs(vec![spec], false, None, cfg, overlay).await
+            }
+        });
+
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("Cmd()".to_string()));
+    }
+}
+
+impl Pipeline {
+    fn new(specs: Vec<CmdSpec>, pipefail: bool) -> Self {
+        let timeout_ms = None;
+        Self {
+            specs,
+            pipefail,
+            timeout_ms,
+        }
+    }
+
+    fn snapshot(&self) -> (Vec<CmdSpec>, bool, Option<u64>) {
+        (self.specs.clone(), self.pipefail, self.timeout_ms)
     }
 }
 
 impl UserData for Pipeline {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("pipefail", |_, this, yes: Option<bool>| {
-            this.inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pipefail = yes.unwrap_or(true);
-            Ok(this.clone())
+        methods.add_method("pipefail", |_, this, yes: Option<bool>| {
+            let (specs, pipefail, timeout_ms) = this.snapshot();
+            Ok(Self {
+                specs,
+                pipefail: yes.unwrap_or(true) || pipefail,
+                timeout_ms,
+            })
         });
 
-        methods.add_method_mut("pipe", |_, this, rhs: Value| match rhs {
-            Value::UserData(ud) => {
-                if let Ok(cmd) = ud.borrow::<Cmd>() {
-                    let rhs_spec = cmd.snapshot();
-                    this.inner
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .specs
-                        .push(rhs_spec);
-                    Ok(this.clone())
-                } else if let Ok(p) = ud.borrow::<Self>() {
-                    let (p_specs, p_pipefail) = p.snapshot();
-                    let mut st = this.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    st.specs.extend(p_specs);
-                    st.pipefail = st.pipefail || p_pipefail;
-                    drop(st);
-                    Ok(this.clone())
-                } else {
-                    Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
-                }
-            }
-            _ => Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into())),
+        #[allow(clippy::cast_sign_loss)]
+        methods.add_method("timeout", |_, this, ms: i64| {
+            let (specs, pipefail, _) = this.snapshot();
+            Ok(Self {
+                specs,
+                pipefail,
+                timeout_ms: Some(ms.max(0) as u64),
+            })
         });
 
-        methods.add_async_method("run", |lua, this, ()| {
-            let (specs, pipefail) = this.snapshot();
-            let overlay = crate::lua::env::overlay_snapshot(&lua);
-            async move { run_pipeline(specs, pipefail, RunMode::Inherit, overlay?).await }
-        });
-
-        methods.add_async_method("output", |lua, this, ()| {
-            let (specs, pipefail) = this.snapshot();
-            let overlay = crate::lua::env::overlay_snapshot(&lua);
-            async move { run_pipeline(specs, pipefail, RunMode::Capture, overlay?).await }
-        });
-
-        methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| {
-            let (mut specs, pipefail) = this.snapshot();
+        methods.add_method("pipe", |_, this, rhs: Value| {
+            let (mut specs, pipefail, timeout_ms) = this.snapshot();
             match rhs {
                 Value::UserData(ud) => {
                     if let Ok(cmd) = ud.borrow::<Cmd>() {
                         specs.push(cmd.snapshot());
-                        Ok(Self::new(specs, pipefail))
+                        Ok(Self {
+                            specs,
+                            pipefail,
+                            timeout_ms,
+                        })
                     } else if let Ok(p) = ud.borrow::<Self>() {
-                        let (p_specs, p_pipefail) = p.snapshot();
+                        let (p_specs, p_pipefail, p_timeout) = p.snapshot();
                         specs.extend(p_specs);
-                        Ok(Self::new(specs, pipefail || p_pipefail))
+                        Ok(Self {
+                            specs,
+                            pipefail: pipefail || p_pipefail,
+                            timeout_ms: timeout_ms.or(p_timeout),
+                        })
+                    } else {
+                        Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into()))
+                    }
+                }
+                _ => Err(mlua::Error::RuntimeError("pipe(): expected Cmd or Pipeline".into())),
+            }
+        });
+
+        methods.add_async_method("run", |lua, this, ()| {
+            let (specs, pipefail, timeout_ms) = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                run_specs(specs, pipefail, RunMode::InheritWithTimeout(timeout_ms), overlay).await
+            }
+        });
+
+        methods.add_async_method("output", |lua, this, ()| {
+            let (specs, pipefail, timeout_ms) = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                run_specs(specs, pipefail, RunMode::CaptureWithTimeout(timeout_ms), overlay).await
+            }
+        });
+
+        methods.add_async_method("spawn", |lua, this, opts: Option<Table>| {
+            let (specs, pipefail, timeout_ms) = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                let cfg = SpawnCfg::from_lua(opts.as_ref(), &specs.last().cloned().unwrap_or_else(CmdSpec::default))?;
+                spawn_specs(specs, pipefail, timeout_ms, cfg, overlay).await
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| {
+            let (mut specs, pipefail, timeout_ms) = this.snapshot();
+            match rhs {
+                Value::UserData(ud) => {
+                    if let Ok(cmd) = ud.borrow::<Cmd>() {
+                        specs.push(cmd.snapshot());
+                        Ok(Self {
+                            specs,
+                            pipefail,
+                            timeout_ms,
+                        })
+                    } else if let Ok(p) = ud.borrow::<Self>() {
+                        let (p_specs, p_pipefail, p_timeout) = p.snapshot();
+                        specs.extend(p_specs);
+                        Ok(Self {
+                            specs,
+                            pipefail: pipefail || p_pipefail,
+                            timeout_ms: timeout_ms.or(p_timeout),
+                        })
                     } else {
                         Err(mlua::Error::RuntimeError("operator | expects Cmd or Pipeline".into()))
                     }
@@ -632,219 +619,333 @@ impl UserData for Pipeline {
                 _ => Err(mlua::Error::RuntimeError("operator | expects Cmd or Pipeline".into())),
             }
         });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("Pipeline()".to_string()));
     }
 }
 
-fn parse_stdio_opt(t: &Table, key: &str, default: bool) -> LuaResult<bool> {
-    let Some(v) = t.get::<Option<Value>>(key)? else {
+impl UserData for ProcChild {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("pid", |_, this, ()| {
+            let st = this.inner.blocking_lock();
+            // Primary pid is the last stage.
+            Ok(st.pids.last().copied().unwrap_or(0))
+        });
+
+        methods.add_method("pids", |lua, this, ()| {
+            let st = this.inner.blocking_lock();
+            let t = lua.create_table()?;
+            for (i, pid) in st.pids.iter().enumerate() {
+                t.set(i + 1, *pid)?;
+            }
+            drop(st);
+            Ok(t)
+        });
+
+        methods.add_async_method("stdin", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut st = inner.lock().await;
+                let Some(w) = st.stdin_raw.take() else {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("not_piped")?));
+                    return Ok(mv);
+                };
+                drop(st);
+                let mut mv = MultiValue::new();
+                mv.push_back(Value::UserData(lua.create_userdata(ProcStdin::new(w))?));
+                Ok(mv)
+            }
+        });
+
+        methods.add_async_method("stdout_lines", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { get_stream(&lua, inner, StreamWhich::Stdout, StreamMode::Lines).await }
+        });
+
+        methods.add_async_method("stderr_lines", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { get_stream(&lua, inner, StreamWhich::Stderr, StreamMode::Lines).await }
+        });
+
+        methods.add_async_method("stdout_bytes", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { get_stream(&lua, inner, StreamWhich::Stdout, StreamMode::Bytes).await }
+        });
+
+        methods.add_async_method("stderr_bytes", |lua, this, ()| {
+            let inner = this.inner.clone();
+            async move { get_stream(&lua, inner, StreamWhich::Stderr, StreamMode::Bytes).await }
+        });
+
+        methods.add_async_method("kill", |_, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut st = inner.lock().await;
+                let mut killed_any = false;
+                for ch in &mut st.children {
+                    if ch.id().is_some() && ch.kill().await.is_ok() {
+                        killed_any = true;
+                    }
+                }
+                drop(st);
+                Ok(killed_any)
+            }
+        });
+
+        methods.add_async_method("wait", |_, this, ()| {
+            let inner = this.inner.clone();
+            async move {
+                let mut st = inner.lock().await;
+
+                // Drain any piped stdio that wasn't turned into a Lua stream.
+                st.drain_unclaimed_stdio();
+
+                let timeout_ms = st.timeout_ms;
+                let outcome = wait_children_with_timeout(&mut st.children, timeout_ms).await?;
+
+                if outcome.timed_out {
+                    // On timeout we abort pumps/aux to avoid hangs on broken pipes.
+                    for t in &st.link_tasks {
+                        t.abort();
+                    }
+                    for t in &st.aux_tasks {
+                        t.abort();
+                    }
+                }
+
+                // Ensure pipe tasks have finished.
+                for t in st.link_tasks.drain(..) {
+                    let _ = t.await;
+                }
+                for t in st.aux_tasks.drain(..) {
+                    let _ = t.await;
+                }
+
+                let ok = if st.pipefail {
+                    outcome.steps.iter().all(|c| *c == 0)
+                } else {
+                    outcome.code == 0
+                };
+                drop(st);
+                Ok(CmdResult {
+                    ok,
+                    code: outcome.code,
+                    signal: outcome.signal,
+                    stdout: None,
+                    stderr: None,
+                    steps: outcome.steps,
+                })
+            }
+        });
+
+        methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcChild()".to_string()));
+    }
+}
+
+impl ProcState {
+    fn drain_unclaimed_stdio(&mut self) {
+        if self.stdout_reader.is_none()
+            && let Some(r) = self.stdout_raw.take()
+        {
+            self.aux_tasks.push(tokio::spawn(async move {
+                let mut rr = r;
+                let mut sink = io::sink();
+                let _ = io::copy(&mut rr, &mut sink).await;
+            }));
+        }
+
+        if self.stderr_reader.is_none()
+            && let Some(r) = self.stderr_raw.take()
+        {
+            self.aux_tasks.push(tokio::spawn(async move {
+                let mut rr = r;
+                let mut sink = io::sink();
+                let _ = io::copy(&mut rr, &mut sink).await;
+            }));
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamWhich {
+    Stdout,
+    Stderr,
+}
+
+async fn get_stream(
+    lua: &Lua,
+    inner: Arc<AsyncMutex<ProcState>>,
+    which: StreamWhich,
+    mode: StreamMode,
+) -> LuaResult<MultiValue> {
+    let mut st = inner.lock().await;
+
+    if which == StreamWhich::Stderr && st.stderr_merged {
+        let mut mv = MultiValue::new();
+        mv.push_back(Value::Nil);
+        mv.push_back(Value::String(lua.create_string("merged")?));
+        return Ok(mv);
+    }
+
+    // Avoid borrowing `st` mutably more than once across control flow by fully
+    // separating the stdout/stderr paths.
+    match which {
+        StreamWhich::Stdout => {
+            if let Some(cur) = st.stdout_mode {
+                if cur != mode {
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("mode_conflict")?));
+                    return Ok(mv);
+                }
+            } else {
+                st.stdout_mode = Some(mode);
+            }
+
+            let shared = if let Some(r) = st.stdout_reader.as_ref() {
+                r.clone()
+            } else {
+                let Some(raw) = st.stdout_raw.take() else {
+                    drop(st);
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("not_piped")?));
+                    return Ok(mv);
+                };
+                let shared: SharedReader = Arc::new(AsyncMutex::new(BufReader::new(raw)));
+                st.stdout_reader = Some(shared.clone());
+                shared
+            };
+
+            drop(st);
+            let mut mv = MultiValue::new();
+            match mode {
+                StreamMode::Lines => mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: shared })?)),
+                StreamMode::Bytes => mv.push_back(Value::UserData(lua.create_userdata(ByteStream { inner: shared })?)),
+            }
+            Ok(mv)
+        }
+        StreamWhich::Stderr => {
+            if let Some(cur) = st.stderr_mode {
+                if cur != mode {
+                    drop(st);
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("mode_conflict")?));
+                    return Ok(mv);
+                }
+            } else {
+                st.stderr_mode = Some(mode);
+            }
+
+            let shared = if let Some(r) = st.stderr_reader.as_ref() {
+                r.clone()
+            } else {
+                let Some(raw) = st.stderr_raw.take() else {
+                    drop(st);
+                    let mut mv = MultiValue::new();
+                    mv.push_back(Value::Nil);
+                    mv.push_back(Value::String(lua.create_string("not_piped")?));
+                    return Ok(mv);
+                };
+                let shared: SharedReader = Arc::new(AsyncMutex::new(BufReader::new(raw)));
+                st.stderr_reader = Some(shared.clone());
+                shared
+            };
+
+            drop(st);
+            let mut mv = MultiValue::new();
+            match mode {
+                StreamMode::Lines => mv.push_back(Value::UserData(lua.create_userdata(LineStream { inner: shared })?)),
+                StreamMode::Bytes => mv.push_back(Value::UserData(lua.create_userdata(ByteStream { inner: shared })?)),
+            }
+            Ok(mv)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RunMode {
+    Inherit,
+    Capture,
+    InheritWithTimeout(Option<u64>),
+    CaptureWithTimeout(Option<u64>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StdioMode {
+    Inherit,
+    Pipe,
+    Null,
+}
+
+#[derive(Clone, Copy)]
+struct SpawnCfg {
+    stdin: StdioMode,
+    stdout: StdioMode,
+    stderr: StdioMode,
+}
+
+impl SpawnCfg {
+    fn from_lua(opts: Option<&Table>, spec: &CmdSpec) -> LuaResult<Self> {
+        let mut cfg = Self {
+            stdin: StdioMode::Inherit,
+            // Spawn is usually used for streaming.
+            stdout: StdioMode::Pipe,
+            stderr: if spec.stderr_to_stdout {
+                StdioMode::Pipe
+            } else {
+                StdioMode::Inherit
+            },
+        };
+
+        let Some(t) = opts else {
+            return Ok(cfg);
+        };
+        cfg.stdin = parse_stdio_mode(t.get::<Option<Value>>("stdin")?, cfg.stdin)?;
+        cfg.stdout = parse_stdio_mode(t.get::<Option<Value>>("stdout")?, cfg.stdout)?;
+        cfg.stderr = parse_stdio_mode(t.get::<Option<Value>>("stderr")?, cfg.stderr)?;
+        Ok(cfg)
+    }
+}
+
+fn parse_stdio_mode(v: Option<Value>, default: StdioMode) -> LuaResult<StdioMode> {
+    let Some(v) = v else {
         return Ok(default);
     };
     match v {
         Value::Nil => Ok(default),
-        Value::Boolean(b) => Ok(b),
+        Value::Boolean(b) => Ok(if b { StdioMode::Pipe } else { StdioMode::Inherit }),
         Value::String(s) => {
-            let s = s.to_str()?;
-            match s.to_lowercase().as_str() {
-                "pipe" => Ok(true),
-                "inherit" => Ok(false),
-                _ => Err(mlua::Error::RuntimeError(format!(
-                    "{key} must be true/false or 'pipe'/'inherit'"
-                ))),
+            let s = s.to_str()?.to_lowercase();
+            match s.as_str() {
+                "pipe" => Ok(StdioMode::Pipe),
+                "inherit" => Ok(StdioMode::Inherit),
+                "null" => Ok(StdioMode::Null),
+                _ => Err(mlua::Error::RuntimeError(
+                    "stdio must be true/false or 'pipe'/'inherit'/'null'".into(),
+                )),
             }
         }
-        _ => Err(mlua::Error::RuntimeError(format!(
-            "{key} must be true/false or 'pipe'/'inherit'"
-        ))),
+        _ => Err(mlua::Error::RuntimeError(
+            "stdio must be true/false or 'pipe'/'inherit'/'null'".into(),
+        )),
     }
 }
 
-fn apply_env_overlay(cmd: &mut Command, overlay: &HashMap<String, Option<String>>) {
+fn apply_env_overlay(cmd: &mut Command, overlay: &EnvOverlay) {
     for (k, v) in overlay {
         match v {
-            Some(val) => cmd.env(k, val),
-            None => cmd.env_remove(k),
-        };
-    }
-}
-
-fn pipe_value(lhs: CmdSpec, rhs: Value) -> LuaResult<Pipeline> {
-    match rhs {
-        Value::UserData(ud) => {
-            if let Ok(cmd) = ud.borrow::<Cmd>() {
-                Ok(Pipeline::new(vec![lhs, cmd.snapshot()], false))
-            } else if let Ok(p) = ud.borrow::<Pipeline>() {
-                let (p_specs, p_pipefail) = p.snapshot();
-                let mut specs = vec![lhs];
-                specs.extend(p_specs);
-                Ok(Pipeline::new(specs, p_pipefail))
-            } else {
-                Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into()))
+            Some(val) => {
+                cmd.env(k, val);
             }
-        }
-        _ => Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into())),
-    }
-}
-
-async fn pump_to_duplex_writer<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    mut reader: R,
-    writer: Arc<AsyncMutex<tokio::io::DuplexStream>>,
-) {
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let mut w = writer.lock().await;
-                if w.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
+            None => {
+                cmd.env_remove(k);
             }
         }
     }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn spawn_cmd(
-    spec: CmdSpec,
-    stdin_piped: bool,
-    stdout_piped: bool,
-    stderr_piped: bool,
-    overlay: HashMap<String, Option<String>>,
-) -> LuaResult<ProcChild> {
-    let mut c = Command::new(&spec.program);
-    c.kill_on_drop(true);
-    c.args(&spec.args);
-    apply_env_overlay(&mut c, &overlay);
-    apply_common_opts(&mut c, &spec);
-
-    // stdin
-    // - If stdin() / stdin_file() was set (Bytes/File), we must pipe to feed it.
-    // - If stdin_piped=true, pipe so Lua can write interactively.
-    // - Otherwise inherit.
-    if stdin_piped || !matches!(spec.stdin, StdinSpec::Inherit) {
-        c.stdin(std::process::Stdio::piped());
-    } else {
-        c.stdin(std::process::Stdio::inherit());
-    }
-
-    // stdout/stderr
-    if stdout_piped {
-        c.stdout(std::process::Stdio::piped());
-    } else {
-        c.stdout(std::process::Stdio::inherit());
-    }
-
-    let need_merge = spec.stderr_to_stdout;
-    if need_merge {
-        if !stdout_piped {
-            return Err(mlua::Error::RuntimeError(
-                "spawn(): stdout must be piped when stderr_to_stdout is enabled".into(),
-            ));
-        }
-        // We must pipe stderr so we can merge it into stdout.
-        c.stderr(std::process::Stdio::piped());
-    } else if stderr_piped {
-        c.stderr(std::process::Stdio::piped());
-    } else {
-        c.stderr(std::process::Stdio::inherit());
-    }
-
-    let mut child = c.spawn().map_err(mlua::Error::external)?;
-    let pid = child.id().map_or(0_i64, i64::from);
-
-    // Stdin handle (for interactive use) OR one-shot feed+close.
-    let mut stdin_handle: Option<ProcStdin> = None;
-    if matches!(spec.stdin, StdinSpec::Inherit) {
-        if stdin_piped && let Some(w) = child.stdin.take() {
-            stdin_handle = Some(ProcStdin::new(w));
-        }
-    } else {
-        // If stdin was configured via cmd:stdin(...) / cmd:stdin_file(...), keep existing behavior:
-        // write once and close stdin.
-        feed_first_stdin(&mut child, spec.stdin.clone()).await?;
-    }
-
-    let mut stdout_stream: Option<SharedReader> = None;
-    let mut stderr_stream: Option<SharedReader> = None;
-
-    if need_merge {
-        let out = child
-            .stdout
-            .take()
-            .ok_or_else(|| mlua::Error::RuntimeError("spawn(): missing stdout".into()))?;
-        let err = child
-            .stderr
-            .take()
-            .ok_or_else(|| mlua::Error::RuntimeError("spawn(): missing stderr".into()))?;
-
-        let (reader_end, writer_end) = tokio::io::duplex(64 * 1024);
-        let writer = Arc::new(AsyncMutex::new(writer_end));
-
-        // Pump both stdout and stderr into one reader.
-        tokio::spawn(pump_to_duplex_writer(out, writer.clone()));
-        tokio::spawn(pump_to_duplex_writer(err, writer));
-
-        stdout_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(reader_end)))));
-    } else {
-        if stdout_piped && let Some(out) = child.stdout.take() {
-            stdout_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(out)))));
-        }
-        if stderr_piped && let Some(err) = child.stderr.take() {
-            stderr_stream = Some(Arc::new(AsyncMutex::new(BufReader::new(Box::new(err)))));
-        }
-    }
-
-    Ok(ProcChild {
-        pid,
-        child: Arc::new(AsyncMutex::new(child)),
-        stdin: stdin_handle,
-        stdout: stdout_stream,
-        stderr: stderr_stream,
-    })
-}
-
-enum RunMode {
-    Inherit,
-    Capture,
-}
-
-async fn pump_to_shared_stdin<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    mut reader: R,
-    writer: Arc<AsyncMutex<ChildStdin>>,
-) {
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let mut w = writer.lock().await;
-                if w.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-async fn feed_first_stdin(child: &mut Child, stdin: StdinSpec) -> mlua::Result<()> {
-    let Some(mut w) = child.stdin.take() else {
-        return Ok(());
-    };
-
-    match stdin {
-        StdinSpec::Inherit => {}
-        StdinSpec::Bytes(b) => {
-            w.write_all(&b).await?;
-        }
-        StdinSpec::File(path) => {
-            if let Ok(mut f) = fs::File::open(path).await {
-                io::copy(&mut f, &mut w).await?;
-            }
-        }
-    }
-    // close stdin
-    drop(w);
-    Ok(())
 }
 
 fn apply_common_opts(cmd: &mut Command, spec: &CmdSpec) {
@@ -852,267 +953,471 @@ fn apply_common_opts(cmd: &mut Command, spec: &CmdSpec) {
         cmd.current_dir(cwd);
     }
     if !spec.env.is_empty() {
-        cmd.envs(&spec.env);
+        cmd.envs(spec.env.iter());
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn run_pipeline(
-    specs: Vec<CmdSpec>,
+struct SpawnedCore {
     pipefail: bool,
-    mode: RunMode,
-    overlay: HashMap<String, Option<String>>,
-) -> LuaResult<CmdResult> {
+    timeout_ms: Option<u64>,
+    children: Vec<Child>,
+    pids: Vec<i64>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<BoxRead>,
+    stderr: Option<BoxRead>,
+    stderr_merged: bool,
+    link_tasks: Vec<JoinHandle<()>>,
+    aux_tasks: Vec<JoinHandle<()>>,
+}
+
+async fn run_specs(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode, overlay: EnvOverlay) -> LuaResult<CmdResult> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
     }
 
-    let n = specs.len();
+    let (capture, timeout_override) = match mode {
+        RunMode::Inherit => (false, None),
+        RunMode::Capture => (true, None),
+        RunMode::InheritWithTimeout(t) => (false, t),
+        RunMode::CaptureWithTimeout(t) => (true, t),
+    };
 
-    // Spawn all children with the correct stdio shapes.
-    let mut children: Vec<Child> = Vec::with_capacity(n);
-
-    for (i, spec) in specs.iter().enumerate() {
-        let mut c = Command::new(&spec.program);
-        c.kill_on_drop(true);
-        c.args(&spec.args);
-        apply_env_overlay(&mut c, &overlay);
-        apply_common_opts(&mut c, spec);
-
-        // stdin:
-        // - first: piped if we need to feed bytes/file, otherwise inherit
-        // - others: piped to accept upstream
-        if i == 0 {
-            match spec.stdin {
-                StdinSpec::Inherit => {
-                    c.stdin(std::process::Stdio::inherit());
-                }
-                _ => {
-                    c.stdin(std::process::Stdio::piped());
-                }
-            }
-        } else {
-            c.stdin(std::process::Stdio::piped());
+    let cfg = if capture {
+        SpawnCfg {
+            stdin: StdioMode::Inherit,
+            stdout: StdioMode::Pipe,
+            stderr: StdioMode::Pipe,
         }
-
-        // stdout:
-        // - intermediate: always piped
-        // - last: inherit for RunMode::Inherit, piped for RunMode::Capture
-        if i < n - 1 {
-            c.stdout(std::process::Stdio::piped());
-        } else {
-            match mode {
-                RunMode::Inherit => c.stdout(std::process::Stdio::inherit()),
-                RunMode::Capture => c.stdout(std::process::Stdio::piped()),
-            };
+    } else {
+        SpawnCfg {
+            stdin: StdioMode::Inherit,
+            stdout: StdioMode::Inherit,
+            stderr: StdioMode::Inherit,
         }
+    };
 
-        // stderr:
-        // - if stderr_to_stdout: pipe it so we can feed into next or merge into captured stdout
-        // - else: inherit (or capture in Capture mode for last command)
-        if spec.stderr_to_stdout {
-            c.stderr(std::process::Stdio::piped());
-        } else if i == n - 1 {
-            match mode {
-                RunMode::Inherit => c.stderr(std::process::Stdio::inherit()),
-                RunMode::Capture => c.stderr(std::process::Stdio::piped()),
-            };
-        } else {
-            // intermediate stderr inherits (shell-like)
-            c.stderr(std::process::Stdio::inherit());
-        }
+    let core = spawn_specs_core(specs.clone(), pipefail, timeout_override, cfg, overlay).await?;
 
-        let child = c.spawn().map_err(mlua::Error::external)?;
-        children.push(child);
-    }
+    let mut stdout_task: Option<JoinHandle<Vec<u8>>> = None;
+    let mut stderr_task: Option<JoinHandle<Vec<u8>>> = None;
 
-    // Wire pipes: stdout(i) -> stdin(i+1). If stderr_to_stdout(i), also stderr(i) -> stdin(i+1).
-    let mut link_tasks = Vec::new();
-
-    // Take all stdio handles we need.
-    let mut stdins: Vec<Option<ChildStdin>> = children.iter_mut().map(|ch| ch.stdin.take()).collect();
-    let mut stdouts: Vec<Option<ChildStdout>> = children.iter_mut().map(|ch| ch.stdout.take()).collect();
-    let mut stderrs = Vec::with_capacity(n);
-    for (i, spec) in specs.iter().enumerate() {
-        if spec.stderr_to_stdout || (i == n - 1 && matches!(mode, RunMode::Capture)) {
-            stderrs.push(children[i].stderr.take());
-        } else {
-            stderrs.push(None);
-        }
-    }
-
-    for i in 0..(n - 1) {
-        let out = stdouts[i]
-            .take()
-            .ok_or_else(|| mlua::Error::RuntimeError("missing stdout for pipe".into()))?;
-        let in_next = stdins[i + 1]
-            .take()
-            .ok_or_else(|| mlua::Error::RuntimeError("missing stdin for pipe".into()))?;
-
-        let shared = Arc::new(AsyncMutex::new(in_next));
-        link_tasks.push(tokio::spawn(pump_to_shared_stdin(out, shared.clone())));
-
-        if specs[i].stderr_to_stdout
-            && let Some(err) = stderrs[i].take()
-        {
-            link_tasks.push(tokio::spawn(pump_to_shared_stdin(err, shared)));
-        }
-    }
-
-    // Feed stdin of first command if configured (bytes/file).
-    feed_first_stdin(&mut children[0], specs[0].stdin.clone()).await?;
-
-    // Capture last stdout/stderr if required.
-    let mut last_stdout_task = None;
-    let mut last_stderr_task = None;
-    let mut last_stderr_to_stdout_task = None;
-
-    if matches!(mode, RunMode::Capture) {
-        if let Some(out) = stdouts[n - 1].take() {
-            last_stdout_task = Some(tokio::spawn(async move {
+    if capture {
+        if let Some(out) = core.stdout {
+            stdout_task = Some(tokio::spawn(async move {
                 let mut r = out;
                 let mut buf = Vec::new();
                 let _ = r.read_to_end(&mut buf).await;
                 buf
             }));
         }
-        if let Some(err) = stderrs[n - 1].take() {
-            last_stderr_task = Some(tokio::spawn(async move {
+        if let Some(err) = core.stderr {
+            stderr_task = Some(tokio::spawn(async move {
                 let mut r = err;
                 let mut buf = Vec::new();
                 let _ = r.read_to_end(&mut buf).await;
                 buf
             }));
         }
-    } else if specs[n - 1].stderr_to_stdout {
-        // In inherit mode, leaving stderr piped without reading it can deadlock the child.
-        // Best-effort: drain the last stderr and forward it to the parent stdout.
-        if let Some(err) = stderrs[n - 1].take() {
-            last_stderr_to_stdout_task = Some(tokio::spawn(async move {
-                let mut r = err;
-                let mut out = tokio::io::stdout();
-                let mut buf = [0u8; 16 * 1024];
-                loop {
-                    match r.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let _ = out.write_all(&buf[..n]).await;
-                            let _ = out.flush().await;
-                        }
-                    }
-                }
-            }));
+    }
+
+    let mut children = core.children;
+    let timeout_ms = core.timeout_ms;
+
+    let outcome = wait_children_with_timeout(&mut children, timeout_ms).await?;
+
+    if outcome.timed_out {
+        for t in &core.link_tasks {
+            t.abort();
+        }
+        for t in &core.aux_tasks {
+            t.abort();
         }
     }
 
-    // Wait with optional timeout (use last command’s timeout if set)
-    let timeout_ms = specs[n - 1].timeout_ms;
-    let wait_fut = async {
-        let mut steps = Vec::with_capacity(n);
-        let mut last_status = None;
-
-        for (i, ch) in children.iter_mut().enumerate() {
-            let status = ch.wait().await.map_err(mlua::Error::external)?;
-            let (code, signal) = normalize_status(status);
-            steps.push(code);
-            if i == n - 1 {
-                last_status = Some((code, signal));
-            }
-        }
-
-        Ok::<_, mlua::Error>((steps, last_status.unwrap_or((1, None))))
-    };
-
-    let (steps, (code, signal)) = if let Some(ms) = timeout_ms.filter(|m| *m > 0) {
-        if let Ok(v) = time::timeout(Duration::from_millis(ms), wait_fut).await {
-            v?
-        } else {
-            // timeout: kill all and reap children to avoid zombies.
-            for ch in &mut children {
-                let _ = ch.kill().await;
-            }
-            for ch in &mut children {
-                let _ = ch.wait().await;
-            }
-
-            // Ensure background pipe/capture tasks don't outlive this call.
-            for t in &link_tasks {
-                t.abort();
-            }
-            for t in link_tasks {
-                let _ = t.await;
-            }
-
-            if let Some(t) = last_stdout_task.take() {
-                t.abort();
-                let _ = t.await;
-            }
-            if let Some(t) = last_stderr_task.take() {
-                t.abort();
-                let _ = t.await;
-            }
-            if let Some(t) = last_stderr_to_stdout_task.take() {
-                t.abort();
-                let _ = t.await;
-            }
-
-            return Ok(CmdResult {
-                ok: false,
-                code: 124,
-                signal: None,
-                stdout: None,
-                stderr: None,
-                steps: vec![],
-            });
-        }
-    } else {
-        wait_fut.await?
-    };
-
-    // Make sure pipe tasks stop
-    for t in link_tasks {
+    for t in core.link_tasks {
+        let _ = t.await;
+    }
+    for t in core.aux_tasks {
         let _ = t.await;
     }
 
-    if let Some(t) = last_stderr_to_stdout_task {
-        let _ = t.await;
-    }
-
-    let mut stdout = match last_stdout_task {
+    let stdout = match stdout_task {
         Some(t) => t.await.ok(),
         None => None,
     };
-    let stderr = match last_stderr_task {
+    let stderr = match stderr_task {
         Some(t) => t.await.ok(),
         None => None,
     };
-
-    // If last command has stderr_to_stdout and we captured, merge stderr into stdout (basic 2>&1 behavior).
-    if matches!(mode, RunMode::Capture)
-        && specs[n - 1].stderr_to_stdout
-        && let Some(e) = &stderr
-    {
-        if stdout.is_none() {
-            stdout = Some(e.clone());
-        } else if let Some(o) = &mut stdout {
-            o.extend_from_slice(e);
-        }
-    }
 
     let ok = if pipefail {
-        steps.iter().all(|c| *c == 0)
+        outcome.steps.iter().all(|c| *c == 0)
     } else {
-        code == 0
+        outcome.code == 0
     };
 
     Ok(CmdResult {
         ok,
-        code,
-        signal,
+        code: outcome.code,
+        signal: outcome.signal,
         stdout,
         stderr,
-        steps,
+        steps: outcome.steps,
     })
+}
+
+async fn spawn_specs(
+    specs: Vec<CmdSpec>,
+    pipefail: bool,
+    timeout_ms: Option<u64>,
+    cfg: SpawnCfg,
+    overlay: EnvOverlay,
+) -> LuaResult<ProcChild> {
+    if specs.is_empty() {
+        return Err(mlua::Error::RuntimeError("empty pipeline".into()));
+    }
+    let core = spawn_specs_core(specs, pipefail, timeout_ms, cfg, overlay).await?;
+    Ok(ProcChild {
+        inner: Arc::new(AsyncMutex::new(ProcState {
+            pipefail: core.pipefail,
+            timeout_ms: core.timeout_ms,
+            children: core.children,
+            pids: core.pids,
+            stdin_raw: core.stdin,
+            stdout_raw: core.stdout,
+            stderr_raw: core.stderr,
+            stderr_merged: core.stderr_merged,
+            stdout_reader: None,
+            stderr_reader: None,
+            stdout_mode: None,
+            stderr_mode: None,
+            link_tasks: core.link_tasks,
+            aux_tasks: core.aux_tasks,
+        })),
+    })
+}
+
+#[allow(clippy::too_many_lines, clippy::unused_async)]
+async fn spawn_specs_core(
+    mut specs: Vec<CmdSpec>,
+    pipefail: bool,
+    timeout_override: Option<u64>,
+    cfg: SpawnCfg,
+    overlay: EnvOverlay,
+) -> LuaResult<SpawnedCore> {
+    if specs.is_empty() {
+        return Err(mlua::Error::RuntimeError("empty pipeline".into()));
+    }
+
+    // Pipeline-level timeout: explicit override wins, otherwise use the smallest non-zero timeout among steps.
+    let timeout_ms = timeout_override.or_else(|| min_nonzero_timeout(&specs));
+
+    let n = specs.len();
+    let last = n - 1;
+
+    // Validate stdin feeding vs interactive piping.
+    let first_stdin_preset = matches!(specs[0].stdin, StdinSpec::Bytes(_) | StdinSpec::File(_));
+    if first_stdin_preset && cfg.stdin == StdioMode::Pipe {
+        return Err(mlua::Error::RuntimeError(
+            "spawn(): cannot combine cmd:stdin(...) / cmd:stdin_file(...) with spawn({ stdin = 'pipe' })".into(),
+        ));
+    }
+
+    // Spawn all children.
+    let mut children: Vec<Child> = Vec::with_capacity(n);
+    let mut pids: Vec<i64> = Vec::with_capacity(n);
+
+    for (i, spec) in specs.iter_mut().enumerate() {
+        let mut c = Command::new(&spec.program);
+        c.kill_on_drop(true);
+        c.args(&spec.args);
+        apply_env_overlay(&mut c, &overlay);
+        apply_common_opts(&mut c, spec);
+
+        // stdin
+        if i == 0 {
+            match (&spec.stdin, cfg.stdin) {
+                (StdinSpec::Bytes(_) | StdinSpec::File(_), _) | (StdinSpec::Inherit, StdioMode::Pipe) => {
+                    c.stdin(std::process::Stdio::piped());
+                }
+                (StdinSpec::Null, _) | (StdinSpec::Inherit, StdioMode::Null) => {
+                    c.stdin(std::process::Stdio::null());
+                }
+                (StdinSpec::Inherit, StdioMode::Inherit) => {
+                    c.stdin(std::process::Stdio::inherit());
+                }
+            }
+        } else {
+            c.stdin(std::process::Stdio::piped());
+        }
+
+        // stdout
+        if i < last {
+            c.stdout(std::process::Stdio::piped());
+        } else {
+            match cfg.stdout {
+                StdioMode::Inherit => c.stdout(std::process::Stdio::inherit()),
+                StdioMode::Pipe => c.stdout(std::process::Stdio::piped()),
+                StdioMode::Null => c.stdout(std::process::Stdio::null()),
+            };
+        }
+
+        // stderr
+        if i < last {
+            if spec.stderr_to_stdout {
+                c.stderr(std::process::Stdio::piped());
+            } else {
+                c.stderr(std::process::Stdio::inherit());
+            }
+        } else if spec.stderr_to_stdout {
+            // Must be piped so we can merge/passthrough.
+            c.stderr(std::process::Stdio::piped());
+        } else {
+            match cfg.stderr {
+                StdioMode::Inherit => c.stderr(std::process::Stdio::inherit()),
+                StdioMode::Pipe => c.stderr(std::process::Stdio::piped()),
+                StdioMode::Null => c.stderr(std::process::Stdio::null()),
+            };
+        }
+
+        let ch = c.spawn().map_err(mlua::Error::external)?;
+        pids.push(ch.id().map_or(0, i64::from));
+        children.push(ch);
+    }
+
+    // Wire pipes.
+    let mut link_tasks: Vec<JoinHandle<()>> = Vec::new();
+    for i in 0..last {
+        let out_i: ChildStdout = children[i]
+            .stdout
+            .take()
+            .ok_or_else(|| mlua::Error::RuntimeError("missing stdout for pipe".into()))?;
+        let in_next: ChildStdin = children[i + 1]
+            .stdin
+            .take()
+            .ok_or_else(|| mlua::Error::RuntimeError("missing stdin for pipe".into()))?;
+
+        let shared = Arc::new(AsyncMutex::new(in_next));
+        link_tasks.push(tokio::spawn(pump_to_shared_stdin(out_i, shared.clone())));
+
+        if specs[i].stderr_to_stdout
+            && let Some(err) = children[i].stderr.take()
+        {
+            link_tasks.push(tokio::spawn(pump_to_shared_stdin(err, shared)));
+        }
+    }
+
+    // Final handles.
+    let stdin_handle: Option<ChildStdin> = if cfg.stdin == StdioMode::Pipe {
+        children[0].stdin.take()
+    } else {
+        None
+    };
+
+    // One-shot stdin feed.
+    let mut aux_tasks: Vec<JoinHandle<()>> = Vec::new();
+    if matches!(specs[0].stdin, StdinSpec::Bytes(_) | StdinSpec::File(_)) {
+        let Some(w) = children[0].stdin.take() else {
+            return Err(mlua::Error::RuntimeError("missing stdin for configured input".into()));
+        };
+        let spec = specs[0].clone();
+        aux_tasks.push(tokio::spawn(async move {
+            let _ = feed_preset_stdin(w, spec.stdin).await;
+        }));
+    }
+
+    // Last-stage stdout/stderr handles.
+    let mut stdout_handle: Option<BoxRead> = None;
+    let mut stderr_handle: Option<BoxRead> = None;
+    let mut stderr_merged = false;
+
+    let last_spec = specs[last].clone();
+    match cfg.stdout {
+        StdioMode::Pipe => {
+            stdout_handle = children[last].stdout.take().map(|x| Box::new(x) as BoxRead);
+        }
+        StdioMode::Inherit | StdioMode::Null => {}
+    }
+
+    // If last stage has stderr_to_stdout, treat stderr as "mergeable" regardless of cfg.stderr.
+    if last_spec.stderr_to_stdout {
+        let err = children[last].stderr.take().map(|x| Box::new(x) as BoxRead);
+        if cfg.stdout == StdioMode::Pipe {
+            // Merge into a single reader using a duplex.
+            let Some(out) = stdout_handle.take() else {
+                return Err(mlua::Error::RuntimeError(
+                    "stderr_to_stdout requires piped stdout in this mode".into(),
+                ));
+            };
+            let Some(err) = err else {
+                return Err(mlua::Error::RuntimeError("missing stderr for merge".into()));
+            };
+
+            let (rx, tx) = io::duplex(16 * 1024);
+            let writer = Arc::new(AsyncMutex::new(tx));
+            aux_tasks.push(tokio::spawn(pump_to_duplex(out, writer.clone())));
+            aux_tasks.push(tokio::spawn(pump_to_duplex(err, writer)));
+            stdout_handle = Some(Box::new(rx) as BoxRead);
+            stderr_handle = None;
+            stderr_merged = true;
+        } else {
+            // Inherit mode: drain stderr and forward to parent stdout.
+            if let Some(err) = err {
+                aux_tasks.push(tokio::spawn(async move {
+                    let mut r = err;
+                    let mut out = tokio::io::stdout();
+                    let mut buf = [0_u8; 16 * 1024];
+                    loop {
+                        match r.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                let _ = out.write_all(&buf[..n]).await;
+                                let _ = out.flush().await;
+                            }
+                        }
+                    }
+                }));
+            }
+            stderr_handle = None;
+            stderr_merged = true;
+        }
+    } else if cfg.stderr == StdioMode::Pipe {
+        stderr_handle = children[last].stderr.take().map(|x| Box::new(x) as BoxRead);
+    }
+
+    Ok(SpawnedCore {
+        pipefail,
+        timeout_ms,
+        children,
+        pids,
+        stdin: stdin_handle,
+        stdout: stdout_handle,
+        stderr: stderr_handle,
+        stderr_merged,
+        link_tasks,
+        aux_tasks,
+    })
+}
+
+fn min_nonzero_timeout(specs: &[CmdSpec]) -> Option<u64> {
+    let mut out: Option<u64> = None;
+    for s in specs {
+        if let Some(ms) = s.timeout_ms {
+            if ms == 0 {
+                continue;
+            }
+            out = out.map_or(Some(ms), |prev| Some(prev.min(ms)));
+        }
+    }
+    out
+}
+
+async fn pump_to_shared_stdin<R>(mut reader: R, stdin: Arc<AsyncMutex<ChildStdin>>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut buf = [0_u8; 16 * 1024];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut w = stdin.lock().await;
+                if w.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = stdin.lock().await.shutdown().await;
+}
+
+async fn pump_to_duplex(mut reader: BoxRead, writer: Arc<AsyncMutex<io::DuplexStream>>) {
+    let mut buf = [0_u8; 16 * 1024];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut w = writer.lock().await;
+                if w.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn feed_preset_stdin(mut w: ChildStdin, stdin: StdinSpec) -> io::Result<()> {
+    match stdin {
+        StdinSpec::Bytes(b) => {
+            w.write_all(&b).await?;
+        }
+        StdinSpec::File(path) => {
+            let mut f = fs::File::open(path).await?;
+            io::copy(&mut f, &mut w).await?;
+        }
+        StdinSpec::Null | StdinSpec::Inherit => {}
+    }
+    let _ = w.shutdown().await;
+    Ok(())
+}
+
+async fn wait_children(children: &mut [Child]) -> LuaResult<(Vec<i64>, (i64, Option<i64>))> {
+    let mut steps = Vec::with_capacity(children.len());
+    let mut last = (1, None);
+    let last_ix = children.len().saturating_sub(1);
+    for (i, ch) in children.iter_mut().enumerate() {
+        let status = ch.wait().await.map_err(mlua::Error::external)?;
+        let (code, signal) = normalize_status(status);
+        steps.push(code);
+        if i == last_ix {
+            last = (code, signal);
+        }
+    }
+    Ok((steps, last))
+}
+
+struct WaitOutcome {
+    steps: Vec<i64>,
+    code: i64,
+    signal: Option<i64>,
+    timed_out: bool,
+}
+
+async fn wait_children_with_timeout(children: &mut [Child], timeout_ms: Option<u64>) -> LuaResult<WaitOutcome> {
+    let Some(ms) = timeout_ms.filter(|v| *v > 0) else {
+        let (steps, (code, signal)) = wait_children(children).await?;
+        return Ok(WaitOutcome {
+            steps,
+            code,
+            signal,
+            timed_out: false,
+        });
+    };
+
+    if let Ok(res) = time::timeout(Duration::from_millis(ms), wait_children(children)).await {
+        let (steps, (code, signal)) = res?;
+        Ok(WaitOutcome {
+            steps,
+            code,
+            signal,
+            timed_out: false,
+        })
+    } else {
+        // Kill and reap everything to avoid zombies.
+        for ch in children.iter_mut() {
+            let _ = ch.kill().await;
+        }
+        for ch in children.iter_mut() {
+            let _ = ch.wait().await;
+        }
+
+        Ok(WaitOutcome {
+            steps: Vec::new(),
+            code: 124,
+            signal: None,
+            timed_out: true,
+        })
+    }
 }
 
 fn normalize_status(status: std::process::ExitStatus) -> (i64, Option<i64>) {
@@ -1131,6 +1436,26 @@ fn normalize_status(status: std::process::ExitStatus) -> (i64, Option<i64>) {
     #[cfg(not(unix))]
     {
         (status.code().unwrap_or(1) as i64, None)
+    }
+}
+
+fn pipe_value(lhs: CmdSpec, rhs: Value) -> LuaResult<Pipeline> {
+    match rhs {
+        Value::UserData(ud) => {
+            if let Ok(cmd) = ud.borrow::<Cmd>() {
+                Ok(Pipeline::new(vec![lhs, cmd.snapshot()], false))
+            } else if let Ok(p) = ud.borrow::<Pipeline>() {
+                let (p_specs, p_pipefail, p_timeout) = p.snapshot();
+                Ok(Pipeline {
+                    specs: std::iter::once(lhs).chain(p_specs).collect(),
+                    pipefail: p_pipefail,
+                    timeout_ms: p_timeout,
+                })
+            } else {
+                Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into()))
+            }
+        }
+        _ => Err(mlua::Error::RuntimeError("pipe expects Cmd or Pipeline".into())),
     }
 }
 
@@ -1167,43 +1492,30 @@ fn parse_cmd_args(args: Variadic<Value>) -> LuaResult<Vec<String>> {
 
 /// Create the process module
 /// # Errors [`mlua::Error`]
+#[allow(clippy::too_many_lines)]
 pub fn define(lua: &Lua) -> LuaResult<Table> {
     let m = lua.create_table()?;
-
-    // cmd(prog, ...args) -> Cmd
     m.set("cmd", lua.create_function(lua_cmd)?)?;
-    // sh("...") -> Cmd  (explicit shell mode)
     m.set("sh", lua.create_function(lua_sh)?)?;
-    // exit(code)
     m.set("exit", lua.create_function(lua_exit)?)?;
-
     Ok(m)
 }
 
-fn lua_cmd(_: &Lua, (prog, args): (String, Variadic<Value>)) -> mlua::Result<Cmd> {
+fn lua_cmd(_: &Lua, (prog, args): (String, Variadic<Value>)) -> LuaResult<Cmd> {
     let args = parse_cmd_args(args)?;
-    Ok(Cmd::new(CmdSpec {
-        program: prog,
-        args,
-        ..Default::default()
-    }))
+    Ok(Cmd::new(prog, args))
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn lua_sh(_: &Lua, script: String) -> mlua::Result<Cmd> {
+fn lua_sh(_: &Lua, script: String) -> LuaResult<Cmd> {
     #[cfg(windows)]
     let (prog, args) = ("cmd".to_string(), vec!["/C".to_string(), script]);
     #[cfg(not(windows))]
     let (prog, args) = ("sh".to_string(), vec!["-lc".to_string(), script]);
-
-    Ok(Cmd::new(CmdSpec {
-        program: prog,
-        args,
-        ..Default::default()
-    }))
+    Ok(Cmd::new(prog, args))
 }
 
-fn lua_exit(_: &Lua, code: Option<i64>) -> mlua::Result<()> {
+fn lua_exit(_: &Lua, code: Option<i64>) -> LuaResult<()> {
     let mut code = code.unwrap_or(0);
     if code < 0 {
         code = 1;
