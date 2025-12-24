@@ -98,17 +98,17 @@ local home = env.get("HOME")
 local port = env.get("PORT", "8080")
 ```
 
-### 3.2 `env.set(key, value) -> true`
+### 3.2 `env.set(key, value) -> boolean`
 
-Set an environment variable in the Ward overlay.
+Set an environment variable in the Ward overlay. Returns `false` if the key is invalid (empty, contains `=`, or contains `\0`) or the value contains `\0`.
 
 ```lua
 env.set("FOO", "bar")
 ```
 
-### 3.3 `env.unset(key) -> true`
+### 3.3 `env.unset(key) -> boolean`
 
-Remove an environment variable (from the overlay).
+Remove an environment variable (from the overlay). Returns `false` if the key is invalid.
 
 ```lua
 env.unset("FOO")
@@ -615,16 +615,27 @@ Represents a spawned child process.
 Methods:
 
 - `child:pid() -> integer`
+- `child:pids() -> table` — array of PIDs for all stages (for pipelines)
 - `child:stdin() -> ProcStdin | nil, err`
   - Returns `nil, "not_piped"` if stdin is not piped.
 - `child:stdout_lines() -> LineStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
+  - Returns `nil, "mode_conflict"` if stdout was already opened as bytes.
+  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
 - `child:stderr_lines() -> LineStream | nil, err`
-  - Returns `nil, "not_piped"` if stderr is not piped (or merged into stdout).
+  - Returns `nil, "not_piped"` if stderr is not piped.
+  - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
+  - Returns `nil, "mode_conflict"` if stderr was already opened as bytes.
+  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
 - `child:stdout_bytes() -> ByteStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
+  - Returns `nil, "mode_conflict"` if stdout was already opened as lines.
+  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
 - `child:stderr_bytes() -> ByteStream | nil, err`
-  - Returns `nil, "not_piped"` if stderr is not piped (or merged into stdout).
+  - Returns `nil, "not_piped"` if stderr is not piped.
+  - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
+  - Returns `nil, "mode_conflict"` if stderr was already opened as lines.
+  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
 - `child:kill() -> boolean` (async)
 - `child:wait() -> CmdResult` (async)
 

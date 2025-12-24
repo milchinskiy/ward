@@ -79,6 +79,8 @@ struct ProcStdin {
 #[derive(Clone)]
 struct ProcChild {
     inner: Arc<AsyncMutex<ProcState>>,
+    // PID snapshot at spawn time to avoid blocking the LocalSet thread.
+    pids_snapshot: Arc<Vec<i64>>,
 }
 
 impl Drop for ProcChild {
@@ -113,7 +115,6 @@ struct ProcState {
     pipefail: bool,
     timeout_ms: Option<u64>,
     children: Vec<Child>,
-    pids: Vec<i64>,
 
     // Raw handles. These are kept until the user asks for a stream.
     stdin_raw: Option<ChildStdin>,
@@ -465,13 +466,14 @@ impl UserData for Cmd {
         methods.add_method("stdin", |_, this, v: Value| {
             let mut spec = this.snapshot();
             spec.stdin = match v {
+                Value::Nil | Value::Boolean(false) => StdinSpec::Inherit,
                 Value::String(s) => StdinSpec::Bytes(s.as_bytes().to_vec()),
-                Value::UserData(_) | Value::Table(_) | Value::Function(_) => {
-                    return Err(mlua::Error::RuntimeError(
-                        "stdin(v): expected bytes string (or nil/false to reset)".into(),
-                    ));
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "stdin(v): expected bytes string (or nil/false to reset), got {}",
+                        other.type_name()
+                    )));
                 }
-                _ => StdinSpec::Inherit,
             };
             Ok(Self { spec })
         });
@@ -651,18 +653,15 @@ impl UserData for ProcChild {
     #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("pid", |_, this, ()| {
-            let st = this.inner.blocking_lock();
             // Primary pid is the last stage.
-            Ok(st.pids.last().copied().unwrap_or(0))
+            Ok(this.pids_snapshot.last().copied().unwrap_or(0))
         });
 
         methods.add_method("pids", |lua, this, ()| {
-            let st = this.inner.blocking_lock();
             let t = lua.create_table()?;
-            for (i, pid) in st.pids.iter().enumerate() {
+            for (i, pid) in this.pids_snapshot.iter().enumerate() {
                 t.set(i + 1, *pid)?;
             }
-            drop(st);
             Ok(t)
         });
 
@@ -1143,12 +1142,12 @@ async fn spawn_specs(
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
     }
     let core = spawn_specs_core(specs, pipefail, timeout_ms, cfg, overlay).await?;
+    let pids_snapshot = Arc::new(core.pids.clone());
     Ok(ProcChild {
         inner: Arc::new(AsyncMutex::new(ProcState {
             pipefail: core.pipefail,
             timeout_ms: core.timeout_ms,
             children: core.children,
-            pids: core.pids,
             stdin_raw: core.stdin,
             stdout_raw: core.stdout,
             stderr_raw: core.stderr,
@@ -1161,6 +1160,7 @@ async fn spawn_specs(
             stdin_task: core.stdin_task,
             aux_tasks: core.aux_tasks,
         })),
+        pids_snapshot,
     })
 }
 

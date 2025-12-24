@@ -274,6 +274,27 @@ pub(crate) async fn fetch_git_async(
     overlay: HashMap<String, Option<String>, std::hash::RandomState>,
 ) -> mlua::Result<FetchResponse> {
     let options = GitOptions::from_value(opts)?;
+
+    // Defensive: prevent arg-style injection into git by rejecting values that look like options.
+    // (E.g. a URL that begins with '-' could be treated as a flag by git.)
+    if url.starts_with('-') {
+        return Err(mlua::Error::external("git url must not start with '-'"));
+    }
+    if let Some(b) = options.branch.as_deref()
+        && b.starts_with('-')
+    {
+        return Err(mlua::Error::external("git branch must not start with '-'"));
+    }
+    if let Some(t) = options.tag.as_deref()
+        && t.starts_with('-')
+    {
+        return Err(mlua::Error::external("git tag must not start with '-'"));
+    }
+    if let Some(r) = options.rev.as_deref()
+        && r.starts_with('-')
+    {
+        return Err(mlua::Error::external("git rev must not start with '-'"));
+    }
     let target = options.into.clone().unwrap_or_else(|| unique_path("fetch-git"));
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).await.map_err(mlua::Error::external)?;
@@ -294,6 +315,7 @@ pub(crate) async fn fetch_git_async(
     if options.recursive {
         clone_args.push("--recurse-submodules".to_string());
     }
+    clone_args.push("--".to_string());
     clone_args.push(url.to_string());
     clone_args.push(path_to_string(&target));
 
@@ -435,9 +457,15 @@ async fn dir_size_async(base: &Path) -> mlua::Result<u64> {
     while let Some(dir) = stack.pop() {
         let mut rd = fs::read_dir(&dir).await.map_err(mlua::Error::external)?;
         while let Some(entry) = rd.next_entry().await.map_err(mlua::Error::external)? {
-            let meta = entry.metadata().await.map_err(mlua::Error::external)?;
+            let path = entry.path();
+            // Important: do not follow symlinks when enforcing size limits.
+            // A symlink could escape the tree or cause inaccurate accounting.
+            let meta = fs::symlink_metadata(&path).await.map_err(mlua::Error::external)?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
-                stack.push(entry.path());
+                stack.push(path);
             } else if meta.is_file() {
                 total = total.saturating_add(meta.len());
             }
