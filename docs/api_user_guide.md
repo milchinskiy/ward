@@ -535,6 +535,10 @@ Builder methods (fluent):
 Notes:
 
 - `cmd:stdin(...)` / `cmd:stdin_file(...)` are **one-shot** stdin configuration for `run/output/spawn` and will be written then closed when spawning.
+- `cmd:stdin(v)` accepts only a bytes string, or `nil`/`false` to reset to inherited stdin. Other values raise an error.
+- `cmd:stdin_file(path)` fails at spawn-time if the file cannot be opened.
+- `cmd:stderr_to_stdout(true)` merges stderr into stdout **best-effort**. Ordering may differ from shell `2>&1`. In capture mode (`output()`), merged data is returned in `stdout` and `stderr` is `nil`.
+
 - `cmd:stdin_null()` sets stdin to a closed stream (equivalent to shell `< /dev/null`).
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
 
@@ -667,6 +671,8 @@ child:wait()
 
 Returned by `ProcChild:stdout_lines()` or `ProcChild:stderr_lines()`.
 
+Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will **compete** for data (load-balancing). Avoid creating multiple readers unless that is intended.
+
 Methods:
 
 - `stream:wait() -> line | nil, err`
@@ -677,6 +683,8 @@ This object follows Ward’s “awaitable” contract (`:wait()`), so it can be 
 #### 6.3.5 `ByteStream` userdata (raw byte streaming)
 
 Returned by `ProcChild:stdout_bytes()` or `ProcChild:stderr_bytes()`.
+
+Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will **compete** for data (load-balancing). Avoid creating multiple readers unless that is intended.
 
 Methods:
 
@@ -788,7 +796,7 @@ If you intentionally want a “fire-and-forget” task, call `t:detach()` to pre
 Waits for the task to finish and returns the function’s return values.
 
 ```lua
-local n, s = t:join()
+local n, s = t:wait()
 print(n, s) -- 42  ok
 ```
 

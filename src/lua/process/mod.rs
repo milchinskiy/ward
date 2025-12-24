@@ -3,7 +3,7 @@
 use mlua::{
     Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -81,6 +81,28 @@ struct ProcChild {
     inner: Arc<AsyncMutex<ProcState>>,
 }
 
+impl Drop for ProcChild {
+    fn drop(&mut self) {
+        // Best-effort cleanup: only act on the last clone and avoid blocking in Drop.
+        if Arc::strong_count(&self.inner) != 1 {
+            return;
+        }
+
+        if let Ok(mut st) = self.inner.try_lock() {
+            st.abort_bg_tasks();
+            return;
+        }
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let inner = self.inner.clone();
+            handle.spawn(async move {
+                let mut st = inner.lock().await;
+                st.abort_bg_tasks();
+            });
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StreamMode {
     Lines,
@@ -110,6 +132,7 @@ struct ProcState {
     // - optional stderr->stdout drain in inherit mode for last command
     // - optional stdin feeder for one-shot stdin
     link_tasks: Vec<JoinHandle<()>>,
+    stdin_task: Option<JoinHandle<io::Result<()>>>,
     aux_tasks: Vec<JoinHandle<()>>,
 }
 
@@ -625,6 +648,7 @@ impl UserData for Pipeline {
 }
 
 impl UserData for ProcChild {
+    #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("pid", |_, this, ()| {
             let st = this.inner.blocking_lock();
@@ -719,6 +743,15 @@ impl UserData for ProcChild {
                 for t in st.link_tasks.drain(..) {
                     let _ = t.await;
                 }
+
+                if let Some(t) = st.stdin_task.take() {
+                    match t.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return Err(mlua::Error::external(e)),
+                        Err(_) => return Err(mlua::Error::RuntimeError("stdin feeder task panicked".into())),
+                    }
+                }
+
                 for t in st.aux_tasks.drain(..) {
                     let _ = t.await;
                 }
@@ -764,6 +797,18 @@ impl ProcState {
                 let mut sink = io::sink();
                 let _ = io::copy(&mut rr, &mut sink).await;
             }));
+        }
+    }
+
+    fn abort_bg_tasks(&mut self) {
+        for t in self.link_tasks.drain(..) {
+            t.abort();
+        }
+        if let Some(t) = self.stdin_task.take() {
+            t.abort();
+        }
+        for t in self.aux_tasks.drain(..) {
+            t.abort();
         }
     }
 }
@@ -967,9 +1012,11 @@ struct SpawnedCore {
     stderr: Option<BoxRead>,
     stderr_merged: bool,
     link_tasks: Vec<JoinHandle<()>>,
+    stdin_task: Option<JoinHandle<io::Result<()>>>,
     aux_tasks: Vec<JoinHandle<()>>,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_specs(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode, overlay: EnvOverlay) -> LuaResult<CmdResult> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
@@ -997,12 +1044,22 @@ async fn run_specs(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode, overlay: 
     };
 
     let core = spawn_specs_core(specs.clone(), pipefail, timeout_override, cfg, overlay).await?;
+    let SpawnedCore {
+        timeout_ms,
+        mut children,
+        stdout,
+        stderr,
+        link_tasks,
+        stdin_task,
+        aux_tasks,
+        ..
+    } = core;
 
     let mut stdout_task: Option<JoinHandle<Vec<u8>>> = None;
     let mut stderr_task: Option<JoinHandle<Vec<u8>>> = None;
 
     if capture {
-        if let Some(out) = core.stdout {
+        if let Some(out) = stdout {
             stdout_task = Some(tokio::spawn(async move {
                 let mut r = out;
                 let mut buf = Vec::new();
@@ -1010,7 +1067,7 @@ async fn run_specs(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode, overlay: 
                 buf
             }));
         }
-        if let Some(err) = core.stderr {
+        if let Some(err) = stderr {
             stderr_task = Some(tokio::spawn(async move {
                 let mut r = err;
                 let mut buf = Vec::new();
@@ -1020,24 +1077,33 @@ async fn run_specs(specs: Vec<CmdSpec>, pipefail: bool, mode: RunMode, overlay: 
         }
     }
 
-    let mut children = core.children;
-    let timeout_ms = core.timeout_ms;
-
     let outcome = wait_children_with_timeout(&mut children, timeout_ms).await?;
 
     if outcome.timed_out {
-        for t in &core.link_tasks {
+        for t in &link_tasks {
             t.abort();
         }
-        for t in &core.aux_tasks {
+        if let Some(t) = &stdin_task {
+            t.abort();
+        }
+        for t in &aux_tasks {
             t.abort();
         }
     }
 
-    for t in core.link_tasks {
+    for t in link_tasks {
         let _ = t.await;
     }
-    for t in core.aux_tasks {
+
+    if let Some(t) = stdin_task {
+        match t.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(mlua::Error::external(e)),
+            Err(_) => return Err(mlua::Error::RuntimeError("stdin feeder task panicked".into())),
+        }
+    }
+
+    for t in aux_tasks {
         let _ = t.await;
     }
 
@@ -1092,6 +1158,7 @@ async fn spawn_specs(
             stdout_mode: None,
             stderr_mode: None,
             link_tasks: core.link_tasks,
+            stdin_task: core.stdin_task,
             aux_tasks: core.aux_tasks,
         })),
     })
@@ -1123,6 +1190,14 @@ async fn spawn_specs_core(
         ));
     }
 
+    // Pre-open stdin_file so errors surface at spawn-time and we can avoid a feeder task.
+    let mut preset_stdin = if let StdinSpec::File(path) = &specs[0].stdin {
+        let f = File::open(path).map_err(mlua::Error::external)?;
+        Some(std::process::Stdio::from(f))
+    } else {
+        None
+    };
+
     // Spawn all children.
     let mut children: Vec<Child> = Vec::with_capacity(n);
     let mut pids: Vec<i64> = Vec::with_capacity(n);
@@ -1136,15 +1211,24 @@ async fn spawn_specs_core(
 
         // stdin
         if i == 0 {
-            match (&spec.stdin, cfg.stdin) {
-                (StdinSpec::Bytes(_) | StdinSpec::File(_), _) | (StdinSpec::Inherit, StdioMode::Pipe) => {
-                    c.stdin(std::process::Stdio::piped());
-                }
-                (StdinSpec::Null, _) | (StdinSpec::Inherit, StdioMode::Null) => {
-                    c.stdin(std::process::Stdio::null());
-                }
-                (StdinSpec::Inherit, StdioMode::Inherit) => {
-                    c.stdin(std::process::Stdio::inherit());
+            if let Some(stdio) = preset_stdin.take() {
+                c.stdin(stdio);
+            } else {
+                match (&spec.stdin, cfg.stdin) {
+                    (StdinSpec::Bytes(_), _) | (StdinSpec::Inherit, StdioMode::Pipe) => {
+                        c.stdin(std::process::Stdio::piped());
+                    }
+                    (StdinSpec::Null, _) | (StdinSpec::Inherit, StdioMode::Null) => {
+                        c.stdin(std::process::Stdio::null());
+                    }
+                    (StdinSpec::Inherit, StdioMode::Inherit) => {
+                        c.stdin(std::process::Stdio::inherit());
+                    }
+                    (StdinSpec::File(_), _) => {
+                        return Err(mlua::Error::RuntimeError(
+                            "stdin_file: internal error (file was not pre-opened)".into(),
+                        ));
+                    }
                 }
             }
         } else {
@@ -1214,17 +1298,19 @@ async fn spawn_specs_core(
         None
     };
 
-    // One-shot stdin feed.
+    // Background tasks.
     let mut aux_tasks: Vec<JoinHandle<()>> = Vec::new();
-    if matches!(specs[0].stdin, StdinSpec::Bytes(_) | StdinSpec::File(_)) {
+
+    // One-shot stdin feed (bytes only). stdin_file is wired directly to the child to surface open errors.
+    let stdin_task: Option<JoinHandle<io::Result<()>>> = if matches!(specs[0].stdin, StdinSpec::Bytes(_)) {
         let Some(w) = children[0].stdin.take() else {
             return Err(mlua::Error::RuntimeError("missing stdin for configured input".into()));
         };
         let spec = specs[0].clone();
-        aux_tasks.push(tokio::spawn(async move {
-            let _ = feed_preset_stdin(w, spec.stdin).await;
-        }));
-    }
+        Some(tokio::spawn(async move { feed_preset_stdin(w, spec.stdin).await }))
+    } else {
+        None
+    };
 
     // Last-stage stdout/stderr handles.
     let mut stdout_handle: Option<BoxRead> = None;
@@ -1295,6 +1381,7 @@ async fn spawn_specs_core(
         stderr: stderr_handle,
         stderr_merged,
         link_tasks,
+        stdin_task,
         aux_tasks,
     })
 }
@@ -1349,11 +1436,19 @@ async fn pump_to_duplex(mut reader: BoxRead, writer: Arc<AsyncMutex<io::DuplexSt
 async fn feed_preset_stdin(mut w: ChildStdin, stdin: StdinSpec) -> io::Result<()> {
     match stdin {
         StdinSpec::Bytes(b) => {
-            w.write_all(&b).await?;
+            if let Err(e) = w.write_all(&b).await
+                && e.kind() != io::ErrorKind::BrokenPipe
+            {
+                return Err(e);
+            }
         }
         StdinSpec::File(path) => {
             let mut f = fs::File::open(path).await?;
-            io::copy(&mut f, &mut w).await?;
+            if let Err(e) = io::copy(&mut f, &mut w).await
+                && e.kind() != io::ErrorKind::BrokenPipe
+            {
+                return Err(e);
+            }
         }
         StdinSpec::Null | StdinSpec::Inherit => {}
     }
@@ -1463,29 +1558,31 @@ fn parse_cmd_args(args: Variadic<Value>) -> LuaResult<Vec<String>> {
     // supports:
     //   cmd("git", "status", "--porcelain")
     //   cmd("git", {"status", "--porcelain"})
+    fn to_arg(v: Value, ix: usize) -> LuaResult<String> {
+        match v {
+            Value::String(s) => Ok(s.to_str()?.to_string()),
+            Value::Integer(i) => Ok(i.to_string()),
+            Value::Number(n) => Ok(n.to_string()),
+            other => Err(mlua::Error::RuntimeError(format!(
+                "cmd(...): argument #{ix} must be string or number, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
     if args.len() == 1
         && let Value::Table(t) = &args[0]
     {
         let mut out = Vec::new();
-        for v in t.sequence_values::<Value>() {
-            match v? {
-                Value::String(s) => out.push(s.to_str()?.to_string()),
-                Value::Integer(i) => out.push(i.to_string()),
-                Value::Number(n) => out.push(n.to_string()),
-                _ => {}
-            }
+        for (ix0, v) in t.sequence_values::<Value>().enumerate() {
+            out.push(to_arg(v?, ix0 + 1)?);
         }
         return Ok(out);
     }
 
     let mut out = Vec::new();
-    for v in args {
-        match v {
-            Value::String(s) => out.push(s.to_str()?.to_string()),
-            Value::Integer(i) => out.push(i.to_string()),
-            Value::Number(n) => out.push(n.to_string()),
-            _ => {}
-        }
+    for (ix0, v) in args.into_iter().enumerate() {
+        out.push(to_arg(v, ix0 + 1)?);
     }
     Ok(out)
 }
