@@ -621,21 +621,21 @@ Methods:
 - `child:stdout_lines() -> LineStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
   - Returns `nil, "mode_conflict"` if stdout was already opened as bytes.
-  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
+  - You may call this multiple times; each handle reads from the same underlying pipe.
 - `child:stderr_lines() -> LineStream | nil, err`
   - Returns `nil, "not_piped"` if stderr is not piped.
   - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
   - Returns `nil, "mode_conflict"` if stderr was already opened as bytes.
-  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
+  - You may call this multiple times; each handle reads from the same underlying pipe.
 - `child:stdout_bytes() -> ByteStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
   - Returns `nil, "mode_conflict"` if stdout was already opened as lines.
-  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
+  - You may call this multiple times; each handle reads from the same underlying pipe.
 - `child:stderr_bytes() -> ByteStream | nil, err`
   - Returns `nil, "not_piped"` if stderr is not piped.
   - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
   - Returns `nil, "mode_conflict"` if stderr was already opened as lines.
-  - Note: this is a one-time take; subsequent calls will return `nil, "not_piped"`.
+  - You may call this multiple times; each handle reads from the same underlying pipe.
 - `child:kill() -> boolean` (async)
 - `child:wait() -> CmdResult` (async)
 

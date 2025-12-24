@@ -69,6 +69,13 @@ fn canonicalize_name(name: &str) -> String {
     out
 }
 
+fn is_safe_module_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[derive(Default)]
 struct GitOpts {
     name: Option<String>,
@@ -250,10 +257,19 @@ pub fn install_externals_searcher(lua: &Lua) -> mlua::Result<()> {
             )]));
         }
         let root_name = parts.get(1).copied().unwrap_or_default();
-        if root_name.is_empty() {
+        if !is_safe_module_segment(root_name) {
             return Ok(MultiValue::from_vec(vec![Value::String(
                 lua.create_string("\n\tinvalid externals module name")?,
             )]));
+        }
+
+        // Validate submodule segments to prevent path traversal.
+        for seg in parts.iter().skip(2) {
+            if !is_safe_module_segment(seg) {
+                return Ok(MultiValue::from_vec(vec![Value::String(
+                    lua.create_string("\n\tinvalid externals module name")?,
+                )]));
+            }
         }
 
         // Build candidates.
@@ -282,7 +298,15 @@ pub fn install_externals_searcher(lua: &Lua) -> mlua::Result<()> {
         }
 
         for cand in candidates {
-            if cand.is_file() {
+            // Reject symlinks to avoid escaping the externals root.
+            let Ok(meta) = std::fs::symlink_metadata(&cand) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+
+            {
                 let content = std::fs::read_to_string(&cand)
                     .map_err(|e| mlua::Error::external(format!("failed to read {}: {e}", path_to_string(&cand))))?;
                 let name = path_to_string(&cand);

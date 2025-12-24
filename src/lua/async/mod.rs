@@ -1,15 +1,53 @@
 #![allow(clippy::unnecessary_wraps)]
 
-use futures_util::future::poll_fn;
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, poll_fn};
 use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, RegistryKey, Table, UserData, UserDataMethods,
     Value, Variadic,
 };
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::Poll;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
+
+/// A Lua registry value with RAII cleanup.
+///
+/// This is critical for cancellation safety and to avoid leaks:
+/// - If a message sits in a channel and the channel is dropped, pending messages will be dropped too.
+/// - If a sender fails (closed/full), the rejected message is dropped.
+///
+/// In all those cases we must remove the registry entry.
+#[derive(Debug)]
+struct RegVal {
+    lua: Lua,
+    key: Option<RegistryKey>,
+}
+
+impl RegVal {
+    fn new(lua: &Lua, v: Value) -> mlua::Result<Self> {
+        Ok(Self {
+            lua: lua.clone(),
+            key: Some(lua.create_registry_value(v)?),
+        })
+    }
+
+    fn into_value(mut self) -> mlua::Result<Value> {
+        let Some(key) = self.key.take() else {
+            return Ok(Value::Nil);
+        };
+        let v: Value = self.lua.registry_value(&key)?;
+        self.lua.remove_registry_value(key)?;
+        Ok(v)
+    }
+}
+
+impl Drop for RegVal {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let _ = self.lua.remove_registry_value(key);
+        }
+    }
+}
 
 async fn await_userdata(ud: AnyUserData) -> mlua::Result<MultiValue> {
     if let Ok(wait_fn) = ud.get::<Function>("wait") {
@@ -59,11 +97,7 @@ async fn channel_recv(lua: Lua, inner: Arc<ChannelInner>) -> mlua::Result<MultiV
     drop(rx);
 
     match msg {
-        Some(key) => {
-            let v: Value = lua.registry_value(&key)?;
-            lua.remove_registry_value(key)?;
-            Ok(mv1(&lua, v))
-        }
+        Some(rv) => Ok(mv1(&lua, rv.into_value()?)),
         None => Ok(mv2(&lua, Value::Nil, Value::String(lua.create_string("closed")?))),
     }
 }
@@ -115,14 +149,13 @@ impl UserData for Task {
 #[derive(Debug)]
 struct ChannelInner {
     // tx is accessed from sync methods; keep std::sync::Mutex.
-    tx: StdMutex<Option<mpsc::Sender<RegistryKey>>>,
+    tx: StdMutex<Option<mpsc::Sender<RegVal>>>,
     // rx must support concurrent recv() calls; serialize them with an async mutex.
-    rx: TokioMutex<mpsc::Receiver<RegistryKey>>,
+    rx: TokioMutex<mpsc::Receiver<RegVal>>,
 }
 
 #[derive(Debug)]
 struct Channel {
-    lua: Lua,
     inner: Arc<ChannelInner>,
 }
 
@@ -130,15 +163,6 @@ impl Drop for Channel {
     fn drop(&mut self) {
         if let Ok(mut txg) = self.inner.tx.lock() {
             *txg = None;
-        }
-
-        // Best-effort drain of queued registry values to avoid leaks.
-        // If the receiver is currently locked by an in-flight `recv()`, we skip draining here.
-        // (Scheduling a drain from `Drop` via `spawn_local` is not safe; it can panic outside a LocalSet.)
-        if let Ok(mut rx) = self.inner.rx.try_lock() {
-            while let Ok(key) = rx.try_recv() {
-                let _ = self.lua.remove_registry_value(key);
-            }
         }
     }
 }
@@ -165,8 +189,8 @@ impl UserData for Channel {
                     .reserve()
                     .await
                     .map_err(|_| mlua::Error::RuntimeError("channel is closed".into()))?;
-                let key = lua.create_registry_value(v)?;
-                permit.send(key);
+                let rv = RegVal::new(&lua, v)?;
+                permit.send(rv);
 
                 Ok(mv1(&lua, Value::Boolean(true)))
             }
@@ -183,15 +207,13 @@ impl UserData for Channel {
                 return Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("closed")?)));
             };
 
-            let key = lua.create_registry_value(v)?;
-            match tx.clone().try_send(key) {
+            let rv = RegVal::new(lua, v)?;
+            match tx.clone().try_send(rv) {
                 Ok(()) => Ok(mv1(lua, Value::Boolean(true))),
-                Err(mpsc::error::TrySendError::Full(k)) => {
-                    lua.remove_registry_value(k)?;
+                Err(mpsc::error::TrySendError::Full(_k)) => {
                     Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("full")?)))
                 }
-                Err(mpsc::error::TrySendError::Closed(k)) => {
-                    lua.remove_registry_value(k)?;
+                Err(mpsc::error::TrySendError::Closed(_k)) => {
                     Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("closed")?)))
                 }
             }
@@ -208,11 +230,7 @@ impl UserData for Channel {
                 return Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("busy")?)));
             };
             match rx.try_recv() {
-                Ok(key) => {
-                    let v: Value = lua.registry_value(&key)?;
-                    lua.remove_registry_value(key)?;
-                    Ok(mv1(lua, v))
-                }
+                Ok(rv) => Ok(mv1(lua, rv.into_value()?)),
                 Err(mpsc::error::TryRecvError::Empty) => {
                     Ok(mv2(lua, Value::Nil, Value::String(lua.create_string("empty")?)))
                 }
@@ -399,9 +417,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         "channel",
         lua.create_function(|lua, opts: Value| {
             let cap = parse_capacity(opts)?;
-            let (tx, rx) = mpsc::channel::<RegistryKey>(cap);
+            let (tx, rx) = mpsc::channel::<RegVal>(cap);
             lua.create_userdata(Channel {
-                lua: lua.clone(),
                 inner: Arc::new(ChannelInner {
                     tx: StdMutex::new(Some(tx)),
                     rx: TokioMutex::new(rx),
@@ -431,7 +448,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             // Build per-entry futures in the *current* task and poll them in list order.
             // This avoids aborting a side-effecting await (e.g. Channel:recv) after it has
             // already consumed input but before results are delivered to Lua.
-            let mut futs: Vec<Pin<Box<dyn Future<Output = mlua::Result<MultiValue>> + Send>>> = Vec::with_capacity(len);
+            let mut futs: Vec<BoxFuture<'static, mlua::Result<MultiValue>>> = Vec::with_capacity(len);
 
             for i in 1..=len_i64 {
                 let v: Value = list.raw_get(i)?;
@@ -440,7 +457,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 };
 
                 // Each future awaits one awaitable and yields its MultiValue.
-                futs.push(Box::pin(async move { await_userdata(ud).await }));
+                futs.push(async move { await_userdata(ud).await }.boxed());
             }
 
             // Biased selection: lowest index wins if multiple are ready in the same poll.

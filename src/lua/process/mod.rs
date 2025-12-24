@@ -3,7 +3,16 @@
 use mlua::{
     Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
 };
-use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fs::File,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -1282,12 +1291,24 @@ async fn spawn_specs_core(
             .ok_or_else(|| mlua::Error::RuntimeError("missing stdin for pipe".into()))?;
 
         let shared = Arc::new(AsyncMutex::new(in_next));
-        link_tasks.push(tokio::spawn(pump_to_shared_stdin(out_i, shared.clone())));
 
-        if specs[i].stderr_to_stdout
-            && let Some(err) = children[i].stderr.take()
-        {
-            link_tasks.push(tokio::spawn(pump_to_shared_stdin(err, shared)));
+        // If this stage merges stderr into the pipeline, two concurrent pumps will feed the same
+        // stdin (stdout and stderr). We must not close stdin until *both* pumps complete.
+        let err_i = if specs[i].stderr_to_stdout {
+            children[i].stderr.take()
+        } else {
+            None
+        };
+        let close_guard = Arc::new(AtomicUsize::new(1 + usize::from(err_i.is_some())));
+
+        link_tasks.push(tokio::spawn(pump_to_shared_stdin(
+            out_i,
+            shared.clone(),
+            close_guard.clone(),
+        )));
+
+        if let Some(err) = err_i {
+            link_tasks.push(tokio::spawn(pump_to_shared_stdin(err, shared, close_guard)));
         }
     }
 
@@ -1399,7 +1420,11 @@ fn min_nonzero_timeout(specs: &[CmdSpec]) -> Option<u64> {
     out
 }
 
-async fn pump_to_shared_stdin<R>(mut reader: R, stdin: Arc<AsyncMutex<ChildStdin>>)
+async fn pump_to_shared_stdin<R>(
+    mut reader: R,
+    stdin: Arc<AsyncMutex<ChildStdin>>,
+    close_guard: Arc<AtomicUsize>,
+)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -1415,7 +1440,11 @@ where
             }
         }
     }
-    let _ = stdin.lock().await.shutdown().await;
+    // Close stdin only after the last upstream pump finishes.
+    // This preserves correct behavior for `stderr_to_stdout` in pipelines.
+    if close_guard.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let _ = stdin.lock().await.shutdown().await;
+    }
 }
 
 async fn pump_to_duplex(mut reader: BoxRead, writer: Arc<AsyncMutex<io::DuplexStream>>) {

@@ -165,11 +165,25 @@ impl GitOptions {
             _ => None,
         };
 
+        // depth: positive number enables shallow clone; false/0 disables (full clone).
+        let depth = match table.get::<Option<Value>>("depth")? {
+            None | Some(Value::Nil | Value::Boolean(true)) => Some(1),
+            #[allow(clippy::cast_sign_loss)]
+            Some(Value::Integer(i)) if i > 0 => {
+                Some(u32::try_from(i).map_err(|_| mlua::Error::external("depth overflow"))?)
+            }
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            Some(Value::Number(n)) if n.is_finite() && n > 0.0 => Some(n as u32),
+            Some(Value::Boolean(false) | Value::Integer(_) | Value::Number(_)) => None,
+            Some(_) => {
+                return Err(mlua::Error::external(
+                    "depth expects a positive number (shallow) or false/0 (full clone)",
+                ));
+            }
+        };
+
         Ok(Self {
-            depth: table
-                .get::<Option<u32>>("depth")?
-                .and_then(|d| (d > 0).then_some(d))
-                .or(Some(1)),
+            depth,
             rev: table.get::<Option<String>>("rev")?,
             branch: table.get::<Option<String>>("branch")?,
             tag: table.get::<Option<String>>("tag")?,
