@@ -79,6 +79,10 @@ struct LifecycleManager {
     // signal listeners start on first use
     started: Arc<AtomicBool>,
 
+    // Fast-path for the VM hook: signal tasks increment this when an event is queued.
+    // The hook can then avoid taking locks on the hot path when there are no pending events.
+    pending: Arc<AtomicU64>,
+
     // signal events flow into broadcast channel
     tx: broadcast::Sender<SignalEvent>,
     rx: Arc<Mutex<broadcast::Receiver<SignalEvent>>>,
@@ -113,6 +117,7 @@ impl LifecycleManager {
         let (tx, rx0) = broadcast::channel(128);
         Self {
             started: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(AtomicU64::new(0)),
             tx,
             rx: Arc::new(Mutex::new(rx0)),
             next_id: Arc::new(AtomicU64::new(1)),
@@ -132,6 +137,7 @@ impl LifecycleManager {
         }
 
         let tx = self.tx.clone();
+        let pending = self.pending.clone();
 
         #[cfg(unix)]
         {
@@ -151,9 +157,11 @@ impl LifecycleManager {
             for (num, name, kind) in specs {
                 let Ok(mut stream) = signal(*kind) else { continue };
                 let tx2 = tx.clone();
+                let pending2 = pending.clone();
                 let ev = SignalEvent { number: *num, name };
                 tokio::spawn(async move {
                     while stream.recv().await.is_some() {
+                        pending2.fetch_add(1, Ordering::Relaxed);
                         let _ = tx2.send(ev.clone());
                     }
                 });
@@ -164,9 +172,11 @@ impl LifecycleManager {
         {
             // Windows: best-effort Ctrl-C -> INT
             let tx2 = tx.clone();
+            let pending2 = pending.clone();
             tokio::spawn(async move {
                 loop {
                     if tokio::signal::ctrl_c().await.is_ok() {
+                        pending2.fetch_add(1, Ordering::Relaxed);
                         let _ = tx2.send(SignalEvent { number: 2, name: "INT" });
                     }
                 }
@@ -229,9 +239,19 @@ pub fn tick(lua: &Lua) -> mlua::Result<()> {
         return Ok(());
     };
 
-    mgr.ensure_started();
+    // Start signal listeners once (cheap on the hot path).
+    if !mgr.started.load(Ordering::Relaxed) {
+        mgr.ensure_started();
+    }
+
+    // Fast-path: no pending signals and no shutdown request.
+    if !mgr.requested() && mgr.pending.load(Ordering::Relaxed) == 0 {
+        return Ok(());
+    }
 
     // Drain events without holding locks during Lua calls.
+    // Reset `pending` optimistically; if a new signal arrives concurrently it will increment again.
+    mgr.pending.swap(0, Ordering::Relaxed);
     let mut drained: Vec<SignalEvent> = Vec::new();
     {
         let mut rx = mgr

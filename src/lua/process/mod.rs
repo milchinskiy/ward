@@ -8,8 +8,8 @@ use std::{
     fs::File,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -20,6 +20,12 @@ use tokio::{
     sync::Mutex as AsyncMutex,
     task::JoinHandle,
     time,
+};
+
+#[cfg(unix)]
+use nix::{
+    sys::signal::{Signal, kill},
+    unistd::Pid,
 };
 
 type EnvOverlay = HashMap<String, Option<String>>;
@@ -99,18 +105,36 @@ impl Drop for ProcChild {
             return;
         }
 
-        if let Ok(mut st) = self.inner.try_lock() {
-            st.abort_bg_tasks();
-            return;
-        }
+        // Try an immediate, non-blocking best-effort kill first.
+        best_effort_kill_pids(&self.pids_snapshot);
 
+        // If we are on a runtime, finish cleanup asynchronously: abort background tasks, kill and reap.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let inner = self.inner.clone();
+            let pids = self.pids_snapshot.clone();
             handle.spawn(async move {
                 let mut st = inner.lock().await;
                 st.abort_bg_tasks();
+                st.kill_and_reap_children(&pids).await;
+                drop(st);
             });
         }
+    }
+}
+
+fn best_effort_kill_pids(pids: &[i64]) {
+    #[cfg(unix)]
+    {
+        for &pid in pids {
+            if let Ok(pid32) = i32::try_from(pid) {
+                let _ = kill(Pid::from_raw(pid32), Signal::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pids;
     }
 }
 
@@ -419,9 +443,7 @@ impl UserData for ProcStdin {
         // NOTE: This is intentionally non-blocking.
         // Using `blocking_lock()` here can deadlock if a write/flush is in progress,
         // because those methods hold the same mutex across an async I/O await.
-        methods.add_method("is_closed", |_, this, ()| {
-            Ok(this.inner.try_lock().is_ok_and(|g| g.is_none()))
-        });
+        methods.add_method("is_closed", |_, this, ()| Ok(this.inner.try_lock().is_ok_and(|g| g.is_none())));
 
         methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcStdin()".to_string()));
     }
@@ -820,6 +842,23 @@ impl ProcState {
         }
         for t in self.aux_tasks.drain(..) {
             t.abort();
+        }
+    }
+
+    async fn kill_and_reap_children(&mut self, pids_snapshot: &[i64]) {
+        // First, attempt an immediate out-of-band kill (non-blocking).
+        // This reduces the chance that an awaited wait() will hang.
+        best_effort_kill_pids(pids_snapshot);
+
+        // Prefer tokio::process handles when available.
+        for ch in &mut self.children {
+            if ch.id().is_some() {
+                let _ = ch.kill().await;
+            }
+        }
+        for ch in &mut self.children {
+            // Never block indefinitely in cleanup.
+            let _ = time::timeout(Duration::from_secs(2), ch.wait()).await;
         }
     }
 }
@@ -1304,11 +1343,7 @@ async fn spawn_specs_core(
         };
         let close_guard = Arc::new(AtomicUsize::new(1 + usize::from(err_i.is_some())));
 
-        link_tasks.push(tokio::spawn(pump_to_shared_stdin(
-            out_i,
-            shared.clone(),
-            close_guard.clone(),
-        )));
+        link_tasks.push(tokio::spawn(pump_to_shared_stdin(out_i, shared.clone(), close_guard.clone())));
 
         if let Some(err) = err_i {
             link_tasks.push(tokio::spawn(pump_to_shared_stdin(err, shared, close_guard)));
@@ -1423,11 +1458,7 @@ fn min_nonzero_timeout(specs: &[CmdSpec]) -> Option<u64> {
     out
 }
 
-async fn pump_to_shared_stdin<R>(
-    mut reader: R,
-    stdin: Arc<AsyncMutex<ChildStdin>>,
-    close_guard: Arc<AtomicUsize>,
-)
+async fn pump_to_shared_stdin<R>(mut reader: R, stdin: Arc<AsyncMutex<ChildStdin>>, close_guard: Arc<AtomicUsize>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
