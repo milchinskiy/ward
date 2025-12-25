@@ -55,9 +55,19 @@ async fn await_userdata(ud: AnyUserData) -> mlua::Result<MultiValue> {
     }
 
     // Optional: calling userdata directly (requires `MetaMethod::Call`).
-    ud.call_async::<MultiValue>(())
-        .await
-        .map_err(|_| mlua::Error::external("awaitable must implement wait() (or __call())"))
+    match ud.call_async::<MultiValue>(()).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // If the userdata isn't callable, Lua reports "attempt to call ...".
+            // Preserve *real* call errors from a valid __call implementation.
+            if let mlua::Error::RuntimeError(msg) = &e
+                && msg.contains("attempt to call")
+            {
+                return Err(mlua::Error::external("awaitable must implement wait() (or __call())"));
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn task_join(lua: Lua, this: &mut Task) -> mlua::Result<MultiValue> {

@@ -648,13 +648,13 @@ Methods:
 
 Returned by `ProcChild:stdin()` when stdin is piped.
 
-Methods (all async unless noted):
+Methods:
 
-- `stdin:write(bytes_string) -> true | nil, err`
-- `stdin:writeln(string) -> true | nil, err` — writes string + `\\n`
-- `stdin:flush() -> true | nil, err`
-- `stdin:close() -> true`
-- `stdin:is_closed() -> boolean`
+- `stdin:write(bytes_string) -> true | nil, err` (async)
+- `stdin:writeln(string) -> true | nil, err` (async) — writes string + `\\n`
+- `stdin:flush() -> true | nil, err` (async)
+- `stdin:close() -> true` (async)
+- `stdin:is_closed() -> boolean` (sync)
 
 Example (interactive stdin):
 

@@ -266,15 +266,16 @@ impl UserData for ByteStream {
             async move { read_chunk(&lua, inner, n).await }
         });
 
-        // Awaitable helper: bytes:wait() == bytes:read()
-        methods.add_async_method("wait", |lua, this, ()| {
+        // Awaitable helper: bytes:wait(n?) == bytes:read(n?)
+        methods.add_async_method("wait", |lua, this, n: Option<i64>| {
             let inner = this.inner.clone();
-            async move { read_chunk(&lua, inner, None).await }
+            async move { read_chunk(&lua, inner, n).await }
         });
 
-        methods.add_async_meta_method(MetaMethod::Call, |lua, this, ()| {
+        // Allow awaitable syntax: bytes(n?) == bytes:wait(n?)
+        methods.add_async_meta_method(MetaMethod::Call, |lua, this, n: Option<i64>| {
             let inner = this.inner.clone();
-            async move { read_chunk(&lua, inner, None).await }
+            async move { read_chunk(&lua, inner, n).await }
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ByteStream()".to_string()));
@@ -415,9 +416,11 @@ impl UserData for ProcStdin {
             }
         });
 
+        // NOTE: This is intentionally non-blocking.
+        // Using `blocking_lock()` here can deadlock if a write/flush is in progress,
+        // because those methods hold the same mutex across an async I/O await.
         methods.add_method("is_closed", |_, this, ()| {
-            let guard = this.inner.blocking_lock();
-            Ok(guard.is_none())
+            Ok(this.inner.try_lock().is_ok_and(|g| g.is_none()))
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("ProcStdin()".to_string()));
