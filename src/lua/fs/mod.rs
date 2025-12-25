@@ -52,16 +52,23 @@ struct OpOutcome {
 }
 
 impl OpOutcome {
+    #[allow(clippy::missing_const_for_fn)]
     fn ok() -> Self {
         Self { ok: true, err: None }
     }
 
     fn fail<E: std::fmt::Display>(e: E) -> Self {
-        Self { ok: false, err: Some(e.to_string()) }
+        Self {
+            ok: false,
+            err: Some(e.to_string()),
+        }
     }
 
     fn fail_msg(msg: impl Into<String>) -> Self {
-        Self { ok: false, err: Some(msg.into()) }
+        Self {
+            ok: false,
+            err: Some(msg.into()),
+        }
     }
 }
 
@@ -243,7 +250,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = MkdirOpts::from_value(opts)?;
-            Ok(op_table(lua, mkdir_async(path.as_path(), opts).await)?)
+            op_table(&lua, mkdir_async(path.as_path(), opts).await)
         })?,
     )?;
 
@@ -252,7 +259,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RemoveOpts::from_value(opts)?;
-            Ok(op_table(lua, rm_async(path.as_path(), opts).await)?)
+            op_table(&lua, rm_async(path.as_path(), opts).await)
         })?,
     )?;
 
@@ -261,7 +268,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, unlink_async(path.as_path(), opts).await)?)
+            op_table(&lua, unlink_async(path.as_path(), opts).await)
         })?,
     )?;
 
@@ -270,7 +277,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, mode, opts): (Value, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
-            Ok(op_table(lua, chmod_async(path.as_path(), mode, opts).await)?)
+            op_table(&lua, chmod_async(path.as_path(), mode, opts).await)
         })?,
     )?;
 
@@ -279,7 +286,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, uid, gid, opts): (Value, u32, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
-            Ok(op_table(lua, chown_async(path.as_path(), uid, gid, opts).await)?)
+            op_table(&lua, chown_async(path.as_path(), uid, gid, opts).await)
         })?,
     )?;
 
@@ -289,7 +296,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, rename_async(old.as_path(), new.as_path(), opts).await)?)
+            op_table(&lua, rename_async(old.as_path(), new.as_path(), opts).await)
         })?,
     )?;
 
@@ -299,7 +306,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, link_async(old.as_path(), new.as_path(), opts).await)?)
+            op_table(&lua, link_async(old.as_path(), new.as_path(), opts).await)
         })?,
     )?;
 
@@ -309,7 +316,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, symlink_path_async(old.as_path(), new.as_path(), opts).await)?)
+            op_table(&lua, symlink_path_async(old.as_path(), new.as_path(), opts).await)
         })?,
     )?;
 
@@ -318,7 +325,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = TouchOpts::from_value(opts)?;
-            Ok(op_table(lua, touch_async(path.as_path(), opts).await)?)
+            op_table(&lua, touch_async(path.as_path(), opts).await)
         })?,
     )?;
 
@@ -345,7 +352,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 value_to_string(data)?.into_bytes()
             };
 
-            Ok(op_table(lua, write_async(path.as_path(), bytes, opts).await)?)
+            op_table(&lua, write_async(path.as_path(), bytes, opts).await)
         })?,
     )?;
 
@@ -355,7 +362,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, copy_async(from.as_path(), to.as_path(), opts).await)?)
+            op_table(&lua, copy_async(from.as_path(), to.as_path(), opts).await)
         })?,
     )?;
 
@@ -365,7 +372,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
-            Ok(op_table(lua, rename_async(from.as_path(), to.as_path(), opts).await)?)
+            op_table(&lua, rename_async(from.as_path(), to.as_path(), opts).await)
         })?,
     )?;
 
@@ -602,7 +609,11 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> OpOutco
                 && meta.file_type().is_symlink()
             {
                 // WARN: For safety, we do not follow symlinks.
-                return if options.force { OpOutcome::ok() } else { OpOutcome::fail_msg("refusing to chmod symlink") };
+                return if options.force {
+                    OpOutcome::ok()
+                } else {
+                    OpOutcome::fail_msg("refusing to chmod symlink")
+                };
             }
 
             if let Err(e) = tokio::fs::set_permissions(&target, perms).await {
@@ -617,7 +628,10 @@ async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> OpOutco
         if success {
             OpOutcome::ok()
         } else {
-            OpOutcome { ok: false, err: first_err }
+            OpOutcome {
+                ok: false,
+                err: first_err,
+            }
         }
     }
 }
@@ -687,7 +701,11 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
             && meta.file_type().is_symlink()
         {
             // WARN: For safety, we do not follow symlinks.
-            return if options.force { OpOutcome::ok() } else { OpOutcome::fail_msg("refusing to chown symlink") };
+            return if options.force {
+                OpOutcome::ok()
+            } else {
+                OpOutcome::fail_msg("refusing to chown symlink")
+            };
         } else if let Err(e) = apply(&target) {
             success = false;
             first_err.get_or_insert_with(|| e.to_string());
@@ -699,7 +717,10 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
         if success {
             OpOutcome::ok()
         } else {
-            OpOutcome { ok: false, err: first_err }
+            OpOutcome {
+                ok: false,
+                err: first_err,
+            }
         }
     }
 }
@@ -751,12 +772,12 @@ async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly
 
     #[cfg(any(unix, target_os = "windows"))]
     {
-        let res = tokio::task::spawn_blocking(move || symlink(source, dest)).await;
-        return match res {
+        let res = tokio::task::spawn_blocking(move || symlink_platform(&source, &dest)).await;
+        match res {
             Ok(Ok(())) => OpOutcome::ok(),
             Ok(Err(e)) => OpOutcome::fail(e),
             Err(e) => OpOutcome::fail(e),
-        };
+        }
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
@@ -816,13 +837,7 @@ async fn touch_async(path: &Path, options: TouchOpts) -> OpOutcome {
             .await
         {
             Ok(_) => {}
-            Err(e) => {
-                return if options.force {
-                    OpOutcome::fail(e)
-                } else {
-                    OpOutcome::fail(e)
-                };
-            }
+            Err(e) => return OpOutcome::fail(e),
         }
     }
 
@@ -1166,14 +1181,12 @@ impl ForceOnly {
 #[derive(Default)]
 struct TouchOpts {
     recursive: bool,
-    force: bool,
 }
 impl TouchOpts {
     fn from_value(value: mlua::Value) -> mlua::Result<Self> {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
                 recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
-                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {
             Ok(Self::default())
@@ -1210,7 +1223,6 @@ impl ReadOpts {
 struct WriteOpts {
     mode: WriteMode,
     binary: bool,
-    force: bool,
 }
 #[derive(Default, PartialEq)]
 enum WriteMode {
@@ -1225,7 +1237,6 @@ impl WriteOpts {
             let mut opts = Self {
                 mode: WriteMode::Overwrite,
                 binary: table.get::<Option<bool>>("binary")?.unwrap_or(false),
-                force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             };
 
             if let Ok(append) = table.get::<bool>("append")
@@ -1263,7 +1274,6 @@ impl WriteOpts {
             Ok(Self {
                 mode: WriteMode::Overwrite,
                 binary: false,
-                force: false,
             })
         }
     }
