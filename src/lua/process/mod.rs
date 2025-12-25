@@ -1,5 +1,6 @@
 #![allow(clippy::missing_const_for_fn)]
 
+use crate::lua::lifecycle;
 use mlua::{
     Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
 };
@@ -1675,7 +1676,7 @@ fn lua_sh(_: &Lua, script: String) -> LuaResult<Cmd> {
     Ok(Cmd::new(prog, args))
 }
 
-fn lua_exit(_: &Lua, code: Option<i64>) -> LuaResult<()> {
+fn lua_exit(lua: &Lua, code: Option<i64>) -> LuaResult<()> {
     let mut code = code.unwrap_or(0);
     if code < 0 {
         code = 1;
@@ -1685,5 +1686,10 @@ fn lua_exit(_: &Lua, code: Option<i64>) -> LuaResult<()> {
     } else {
         i32::try_from(code).unwrap_or(0)
     };
-    std::process::exit(code_i32);
+    // Do not terminate the host process directly from inside the Lua runtime.
+    // Request a controlled shutdown so the runner can unwind and run shutdown handlers.
+    lifecycle::request_shutdown(lua, Some(code_i32))?;
+
+    // Interrupt execution immediately.
+    Err(lifecycle::exit_requested_error())
 }

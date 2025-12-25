@@ -125,6 +125,9 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         }
     };
 
+    let exec_was_exit_requested = matches!(exec_res, Err(crate::Error::Lua(ref e))
+        if crate::lua::lifecycle::is_exit_requested_error(e));
+
     // Decide a reason for shutdown callbacks.
     let reason = if matches!(exec_res, Err(crate::Error::Timeout(_))) {
         crate::lua::lifecycle::ShutdownReason::Timeout
@@ -144,13 +147,17 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         (Err(e), _) => Err(e),
     };
 
-    // If the VM asked for shutdown with a non-zero exit code, prefer that over a generic error.
-    if out.is_err()
-        && crate::lua::lifecycle::shutdown_requested(lua)
+    // If the VM asked for shutdown with an explicit exit code, prefer that over generic errors.
+    // IMPORTANT: code=0 must not mask real errors. We only treat code=0 as success when execution
+    // was interrupted by `process.exit(0)` (ExitRequested marker).
+    if crate::lua::lifecycle::shutdown_requested(lua)
         && let Some(code) = crate::lua::lifecycle::shutdown_code(lua)
-        && code != 0
     {
-        out = Err(crate::Error::Exit(code));
+        if code != 0 {
+            out = Err(crate::Error::Exit(code));
+        } else if exec_was_exit_requested {
+            out = Ok(());
+        }
     }
 
     out

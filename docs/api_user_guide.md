@@ -196,6 +196,12 @@ local fs = require("ward.fs")
 - `fs.is_readable(path) -> boolean`
 - `fs.is_writable(path) -> boolean`
 
+Notes:
+
+- For files, `fs.is_readable/fs.is_writable` check whether the file can be opened for read/write.
+- For directories, `fs.is_readable` checks whether the directory can be listed (`read_dir`), and
+  `fs.is_writable` checks whether a temporary file can be created and removed inside the directory.
+
 Example:
 
 ```lua
@@ -353,7 +359,6 @@ Create file if missing and update timestamps.
 
 Options:
 
-- `force` (boolean, default `false`)
 - `recursive` (boolean, default `false`) — create parent directories first
 
 ```lua
@@ -387,7 +392,6 @@ Options (selected):
 - `mode` (`"overwrite"|"append"|"prepend"|"binary"`, default `"overwrite"`)
 - `append` (boolean, optional convenience; equivalent to `mode="append"`)
 - `binary` (boolean, default `false`) — convert `data` as bytes
-- `force` (boolean, default `false`)
 
 Notes:
 
@@ -402,6 +406,11 @@ assert(fs.write("out.txt", "more\n", { mode = "append" }).ok)
 
 - `fs.copy(from, to, opts?) -> { ok, err }`
 - `fs.move(from, to, opts?) -> { ok, err }`
+
+Notes:
+
+- `fs.copy` operates on regular files; it does not copy directories.
+- `fs.move` uses `rename` when possible. On cross-device moves it falls back to copy+remove for regular files; moving directories or symlinks across devices is currently unsupported.
 
 ### 4.9 Temporary directories
 
@@ -508,6 +517,18 @@ Run a shell fragment using the platform default shell:
 ```lua
 local cmd = process.sh("echo $HOME")
 ```
+
+
+#### `process.exit(code?) -> (raises)`
+
+Request script termination with an exit status.
+
+- This does **not** terminate the host process immediately.
+- Ward requests shutdown, unwinds execution, runs shutdown handlers, and then the CLI exits with the given status.
+- `code` defaults to `0`. Negative values are coerced to `1`. Values above `i32::MAX` are clamped.
+
+Use this for early returns from scripts that still need cleanup handlers to run.
+
 
 ### 6.2 `CmdResult` userdata (result of run/output)
 

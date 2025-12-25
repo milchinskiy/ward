@@ -12,6 +12,16 @@ use mlua::{
 
 use chrono::{Datelike, Timelike};
 
+// Try a small set of common "human" formats (assumed UTC).
+const FMTS: &[&str] = &[
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+];
+
 #[derive(Clone, Debug)]
 pub struct TimePoint(DateTime<Utc>);
 
@@ -491,7 +501,33 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     time.set("parse_rfc2822", lua.create_function(|_, value: String| parse_rfc2822(&value))?)?;
     time.set(
         "parse",
-        lua.create_function(|_, (fmt, value): (String, String)| parse_with_format(&fmt, &value))?,
+        lua.create_function(|lua, args: MultiValue| {
+            let mut it = args.into_iter();
+
+            let first = it
+                .next()
+                .ok_or_else(|| mlua::Error::external("time.parse expects 1 or 2 arguments"))?;
+
+            let second = it.next();
+
+            if it.next().is_some() {
+                return Err(mlua::Error::external("time.parse expects 1 or 2 arguments"));
+            }
+
+            match second {
+                None => {
+                    // Best-effort parser: returns nil on failure.
+                    let value = <String as mlua::FromLua>::from_lua(first, lua)?;
+                    Ok(parse_best_effort(&value))
+                }
+                Some(v) => {
+                    // Format parser: (fmt, value) -> TimePoint (raises on invalid format).
+                    let fmt = <String as mlua::FromLua>::from_lua(first, lua)?;
+                    let value = <String as mlua::FromLua>::from_lua(v, lua)?;
+                    Ok(Some(parse_with_format(&fmt, &value)?))
+                }
+            }
+        })?,
     )?;
 
     time.set(
@@ -596,18 +632,14 @@ fn validate_sleep(seconds: f64) -> mlua::Result<()> {
     Ok(())
 }
 
-fn parse_rfc3339(value: &str) -> mlua::Result<TimePoint> {
-    let datetime = DateTime::parse_from_rfc3339(value)
-        .map_err(mlua::Error::external)?
-        .with_timezone(&Utc);
-    Ok(TimePoint::new(datetime))
+fn parse_rfc3339(value: &str) -> mlua::Result<Option<TimePoint>> {
+    DateTime::parse_from_rfc3339(value)
+        .map_or_else(|_| Ok(None), |datetime| Ok(Some(TimePoint::new(datetime.with_timezone(&Utc)))))
 }
 
-fn parse_rfc2822(value: &str) -> mlua::Result<TimePoint> {
-    let datetime = DateTime::parse_from_rfc2822(value)
-        .map_err(mlua::Error::external)?
-        .with_timezone(&Utc);
-    Ok(TimePoint::new(datetime))
+fn parse_rfc2822(value: &str) -> mlua::Result<Option<TimePoint>> {
+    DateTime::parse_from_rfc2822(value)
+        .map_or_else(|_| Ok(None), |datetime| Ok(Some(TimePoint::new(datetime.with_timezone(&Utc)))))
 }
 
 /// Parse using chrono format strings.
@@ -631,6 +663,29 @@ fn parse_with_format(fmt: &str, value: &str) -> mlua::Result<TimePoint> {
     }
 
     Err(mlua::Error::external("failed to parse date/time"))
+}
+
+fn parse_best_effort(value: &str) -> Option<TimePoint> {
+    // Try common structured formats first.
+    if let Ok(Some(tp)) = parse_rfc3339(value) {
+        return Some(tp);
+    }
+    if let Ok(Some(tp)) = parse_rfc2822(value) {
+        return Some(tp);
+    }
+
+    for fmt in FMTS {
+        if *fmt == "%Y-%m-%d" || *fmt == "%Y/%m/%d" {
+            if let Ok(d) = NaiveDate::parse_from_str(value, fmt) {
+                let dt = d.and_hms_opt(0, 0, 0)?;
+                return Some(TimePoint::new(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)));
+            }
+        } else if let Ok(dt) = NaiveDateTime::parse_from_str(value, fmt) {
+            return Some(TimePoint::new(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)));
+        }
+    }
+
+    None
 }
 
 /// Safer f64 seconds -> `DateTime`, including negative timestamps.

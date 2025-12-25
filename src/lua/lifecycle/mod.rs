@@ -3,12 +3,39 @@
 use mlua::{AppDataRef, Function, Lua, RegistryKey, Table, Value};
 use std::{
     collections::HashMap,
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering},
     },
 };
 use tokio::sync::broadcast;
+
+/// Marker error used to interrupt Lua execution for `process.exit(...)` without terminating the host
+/// process immediately. The runner detects this and translates it into the requested exit status.
+#[derive(Debug)]
+pub struct ExitRequested;
+
+impl fmt::Display for ExitRequested {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "exit requested")
+    }
+}
+
+impl std::error::Error for ExitRequested {}
+
+#[must_use]
+pub fn exit_requested_error() -> mlua::Error {
+    mlua::Error::external(ExitRequested)
+}
+
+#[must_use]
+pub fn is_exit_requested_error(e: &mlua::Error) -> bool {
+    match e {
+        mlua::Error::ExternalError(err) => err.is::<ExitRequested>(),
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ShutdownReason {

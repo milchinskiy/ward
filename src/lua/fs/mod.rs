@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use filetime::FileTime;
@@ -171,7 +171,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         "is_readable",
         lua.create_async_function(|_, path: Value| async move {
             let path = value_to_path_buf(path)?;
-            Ok(can_open_async(path.as_path(), true, false).await)
+            Ok(is_readable_path_async(path.as_path()).await)
         })?,
     )?;
 
@@ -179,7 +179,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         "is_writable",
         lua.create_async_function(|_, path: Value| async move {
             let path = value_to_path_buf(path)?;
-            Ok(can_open_async(path.as_path(), false, true).await)
+            Ok(is_writable_path_async(path.as_path()).await)
         })?,
     )?;
 
@@ -372,7 +372,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
-            op_table(&lua, rename_async(from.as_path(), to.as_path(), opts).await)
+            op_table(&lua, move_async(from.as_path(), to.as_path(), opts).await)
         })?,
     )?;
 
@@ -442,25 +442,110 @@ async fn can_open_async(path: &Path, read: bool, write: bool) -> bool {
     opts.open(path).await.is_ok()
 }
 
+async fn can_read_dir_async(path: &Path) -> bool {
+    match tokio::fs::read_dir(path).await {
+        Ok(mut rd) => rd.next_entry().await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+const WRITE_PROBE_RETRIES: u32 = 4;
+
+async fn can_write_dir_async(path: &Path) -> bool {
+    // Directory writability is not reliably inferable from mode bits alone (ACLs, Windows, etc.).
+    // We probe by creating (and best-effort removing) a temporary file inside the directory.
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+
+    for attempt in 0..WRITE_PROBE_RETRIES {
+        let probe = path.join(format!(".ward_write_probe_{pid}_{nanos}_{attempt}"));
+        match opts.open(&probe).await {
+            Ok(f) => {
+                drop(f);
+                // Best-effort cleanup. If removal fails, the directory was still writable.
+                let _ = tokio::fs::remove_file(&probe).await;
+                return true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(_) => return false,
+        }
+    }
+
+    false
+}
+
+
+async fn is_readable_path_async(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => {
+            if meta.is_dir() {
+                can_read_dir_async(path).await
+            } else {
+                can_open_async(path, true, false).await
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+async fn is_writable_path_async(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => {
+            if meta.is_dir() {
+                can_write_dir_async(path).await
+            } else {
+                // On Unix, opening the write end of a FIFO can block until a reader exists.
+                // Avoid probe hangs by treating FIFOs/sockets as not writable for this check.
+                #[cfg(unix)]
+                {
+                    let ft = meta.file_type();
+                    if ft.is_fifo() || ft.is_socket() {
+                        return false;
+                    }
+                }
+                can_open_async(path, false, true).await
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+
 async fn mkdir_async(path: &Path, options: MkdirOpts) -> OpOutcome {
     let target = path.to_path_buf();
 
     if exists_async(&target).await {
-        match tokio::fs::symlink_metadata(&target).await {
+        match tokio::fs::metadata(&target).await {
             Ok(meta) => {
                 if meta.is_dir() {
                     return OpOutcome::ok();
                 }
 
                 if options.force {
-                    // Works for files and symlinks.
-                    let _ = tokio::fs::remove_file(&target).await;
+                    // Best-effort: remove the existing non-directory path without following symlinks.
+                    maybe_force_remove(&target).await;
+                    if exists_async(&target).await {
+                        return OpOutcome::fail_msg("path exists and could not be removed");
+                    }
                 } else {
                     return OpOutcome::fail_msg("path exists and is not a directory");
                 }
             }
             Err(e) => {
-                if !options.force {
+                if options.force {
+                    // `metadata()` follows symlinks; it can fail on dangling symlinks.
+                    // If force is set, try removing the path and continue.
+                    maybe_force_remove(&target).await;
+                    if exists_async(&target).await {
+                        return OpOutcome::fail(e);
+                    }
+                } else {
                     return OpOutcome::fail(e);
                 }
             }
@@ -474,8 +559,10 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> OpOutcome {
     };
 
     if let Err(e) = res {
-        // If force and the path exists after the failure, treat as success.
-        if options.force && exists_async(&target).await {
+        // Race/TOCTOU: if we lost the race and the path is now a directory, treat as success.
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            && tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false)
+        {
             return OpOutcome::ok();
         }
         return OpOutcome::fail(e);
@@ -494,6 +581,7 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> OpOutcome {
 
     OpOutcome::ok()
 }
+
 
 async fn rm_async(path: &Path, options: RemoveOpts) -> OpOutcome {
     let target = path.to_path_buf();
@@ -752,6 +840,60 @@ async fn rename_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> O
     }
 }
 
+fn is_cross_device_error(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        // EXDEV (cross-device link) is 18 on POSIX systems.
+        e.raw_os_error() == Some(18)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // ERROR_NOT_SAME_DEVICE is 17.
+        return e.raw_os_error() == Some(17);
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    false
+}
+
+async fn move_async(from: &Path, to: &Path, options: ForceOnly) -> OpOutcome {
+    if options.force && exists_async(to).await {
+        maybe_force_remove(to).await;
+    }
+
+    match tokio::fs::rename(from, to).await {
+        Ok(()) => OpOutcome::ok(),
+        Err(e) => {
+            if !is_cross_device_error(&e) {
+                return OpOutcome::fail(e);
+            }
+
+            // Cross-device fallback for regular files only:
+            // copy + remove. This intentionally does not support dirs or symlinks yet.
+            let meta = match tokio::fs::symlink_metadata(from).await {
+                Ok(m) => m,
+                Err(me) => return OpOutcome::fail(me),
+            };
+
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                return OpOutcome::fail_msg("cross-device move of symlinks is not supported");
+            }
+            if meta.is_dir() {
+                return OpOutcome::fail_msg("cross-device move of directories is not supported");
+            }
+
+            if let Err(ce) = tokio::fs::copy(from, to).await {
+                return OpOutcome::fail(ce);
+            }
+            if let Err(re) = tokio::fs::remove_file(from).await {
+                return OpOutcome::fail(re);
+            }
+            OpOutcome::ok()
+        }
+    }
+}
+
+
 async fn link_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> OpOutcome {
     if options.force && exists_async(new_path).await {
         maybe_force_remove(new_path).await;
@@ -791,19 +933,27 @@ async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly
     }
 }
 
-async fn readlink_async(path: &Path) -> mlua::Result<String> {
-    tokio::fs::read_link(path)
-        .await
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(mlua::Error::external)
+async fn readlink_async(path: &Path) -> mlua::Result<Option<String>> {
+    match tokio::fs::read_link(path).await {
+        Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        // Not a symlink (platform-specific error kind); return nil per API docs.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(None),
+        Err(e) => Err(mlua::Error::external(e)),
+    }
 }
 
-async fn realpath_async(path: &Path) -> mlua::Result<String> {
-    tokio::fs::canonicalize(path)
-        .await
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(mlua::Error::external)
+
+
+async fn realpath_async(path: &Path) -> mlua::Result<Option<String>> {
+    match tokio::fs::canonicalize(path).await {
+        Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(mlua::Error::external(e)),
+    }
 }
+
+
 
 fn dirname(path: &Path) -> String {
     let path = PathBuf::from(path);
@@ -1001,11 +1151,9 @@ fn join(path: PathBuf, rest: mlua::Variadic<Value>) -> mlua::Result<String> {
     let mut buf = path;
     for part in rest.iter() {
         let addition = value_to_path_buf(part.clone())?;
-        for comp in addition.components() {
-            if matches!(comp, Component::RootDir) {
-                buf.clone_from(&addition);
-                break;
-            }
+        if addition.is_absolute() {
+            buf = addition;
+            continue;
         }
         buf.push(addition);
     }
