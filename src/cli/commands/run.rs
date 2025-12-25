@@ -46,7 +46,7 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
             })
             .long("instruction-limit")
             .short('i')
-            .help("Instruction limit")
+            .help("Instruction limit (approximate; enforced via VM hook every ~1024 instructions)")
             .single(),
         )
         .opt(

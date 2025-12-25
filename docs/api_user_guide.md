@@ -72,6 +72,21 @@ end
 
 ---
 
+
+### 2.1 CLI sandbox limits (`ward run`)
+
+`ward run` executes a Lua file under a configurable sandbox. The most commonly used switches are:
+
+- `--memory-limit BYTES` — maximum Lua memory usage
+- `--instruction-limit N` — approximate instruction budget (see notes below)
+- `--timeout SECONDS` — wall-clock timeout
+- `--threads N` — Tokio worker threads
+
+Notes:
+
+- **Instruction limiting is intentionally coarse.** Ward installs a Lua VM hook every 1024 instructions (or less if the configured limit is smaller), so a script may exceed the configured limit by up to 1023 instructions.
+- The instruction hook does not execute while awaiting Rust async operations (e.g., I/O). Long-running I/O does not consume the instruction budget.
+
 ## 3. `ward.env` — environment and PATH tools
 
 Ward uses an environment overlay:
@@ -240,8 +255,8 @@ local fs = require("ward.fs")
 local path = require("ward.fs.path")
 
 local p = path.new("build/../out/app.bin"):normalize()
-assert(fs.mkdir(p:dirname(), { recursive = true, force = true }))
-fs.write(p, "hello\n")
+assert(fs.mkdir(p:dirname(), { recursive = true, force = true }).ok)
+assert(fs.write(p, "hello\n").ok)
 print("wrote:", tostring(p))
 ```
 
@@ -288,7 +303,10 @@ end
 
 ### 4.4 Directories and removal
 
-#### `fs.mkdir(path, opts?) -> boolean`
+**Result convention for mutating operations:** most functions that change the filesystem return a table `{ ok, err }` where `ok` is a boolean and `err` is a string (or `nil` on success). When `ok` is `false`, `err` is intended to be human-readable and suitable for printing/logging.
+
+
+#### `fs.mkdir(path, opts?) -> { ok, err }`
 
 Create directory.
 
@@ -299,10 +317,10 @@ Options:
 - `force` (boolean, default `false`) — treat “already exists” as success
 
 ```lua
-fs.mkdir("build", { recursive = true, mode = 0o755 })
+assert(fs.mkdir("build", { recursive = true, mode = 0o755 }).ok)
 ```
 
-#### `fs.rm(path, opts?) -> boolean`
+#### `fs.rm(path, opts?) -> { ok, err }`
 
 Remove file or directory.
 
@@ -312,24 +330,24 @@ Options:
 - `force` (boolean, default `false`) — treat missing-path as success
 
 ```lua
-fs.rm("build", { recursive = true, force = true })
+assert(fs.rm("build", { recursive = true, force = true }).ok)
 ```
 
-#### `fs.unlink(path, opts?) -> boolean`
+#### `fs.unlink(path, opts?) -> { ok, err }`
 
 Remove a file (like `rm -f file`).
 
 ### 4.5 Permissions and links
 
-- `fs.chmod(path, mode) -> boolean`
-- `fs.chown(path, uid, gid) -> boolean` (Unix)
-- `fs.rename(from, to) -> boolean`
-- `fs.link(from, to) -> boolean` (hard link)
-- `fs.symlink(from, to) -> boolean` (symbolic link)
+- `fs.chmod(path, mode) -> { ok, err }`
+- `fs.chown(path, uid, gid) -> { ok, err }` (Unix)
+- `fs.rename(from, to) -> { ok, err }`
+- `fs.link(from, to) -> { ok, err }` (hard link)
+- `fs.symlink(from, to) -> { ok, err }` (symbolic link)
 
 ### 4.6 Timestamps
 
-#### `fs.touch(path, opts?) -> boolean`
+#### `fs.touch(path, opts?) -> { ok, err }`
 
 Create file if missing and update timestamps.
 
@@ -339,7 +357,7 @@ Options:
 - `recursive` (boolean, default `false`) — create parent directories first
 
 ```lua
-fs.touch("logs/app.log", { recursive = true })
+assert(fs.touch("logs/app.log", { recursive = true }).ok)
 ```
 
 ### 4.7 File IO
@@ -360,7 +378,7 @@ Notes:
 local data = fs.read("README.md")
 ```
 
-#### `fs.write(path, data, opts?) -> boolean`
+#### `fs.write(path, data, opts?) -> { ok, err }`
 
 Write data to a file.
 
@@ -376,14 +394,14 @@ Notes:
 - Ward does not automatically create parent directories; combine with `fs.mkdir(fs.dirname(path), {recursive=true})`.
 
 ```lua
-fs.write("out.txt", "hello\n")
-fs.write("out.txt", "more\n", { mode = "append" })
+assert(fs.write("out.txt", "hello\n").ok)
+assert(fs.write("out.txt", "more\n", { mode = "append" }).ok)
 ```
 
 ### 4.8 Copy and move
 
-- `fs.copy(from, to, opts?) -> boolean`
-- `fs.move(from, to, opts?) -> boolean`
+- `fs.copy(from, to, opts?) -> { ok, err }`
+- `fs.move(from, to, opts?) -> { ok, err }`
 
 ### 4.9 Temporary directories
 

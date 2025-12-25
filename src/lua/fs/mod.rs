@@ -45,6 +45,33 @@ fn symlink_platform(source: &Path, dest: &Path) -> std::io::Result<()> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct OpOutcome {
+    ok: bool,
+    err: Option<String>,
+}
+
+impl OpOutcome {
+    fn ok() -> Self {
+        Self { ok: true, err: None }
+    }
+
+    fn fail<E: std::fmt::Display>(e: E) -> Self {
+        Self { ok: false, err: Some(e.to_string()) }
+    }
+
+    fn fail_msg(msg: impl Into<String>) -> Self {
+        Self { ok: false, err: Some(msg.into()) }
+    }
+}
+
+fn op_table(lua: &Lua, out: OpOutcome) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("ok", out.ok)?;
+    t.set("err", out.err)?;
+    Ok(t)
+}
+
 /// Initializes the `fs` module
 /// # Errors [`mlua::Error`]
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
@@ -213,85 +240,85 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "mkdir",
-        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
+        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = MkdirOpts::from_value(opts)?;
-            mkdir_async(path.as_path(), opts).await
+            Ok(op_table(lua, mkdir_async(path.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "rm",
-        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
+        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RemoveOpts::from_value(opts)?;
-            rm_async(path.as_path(), opts).await
+            Ok(op_table(lua, rm_async(path.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "unlink",
-        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
+        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = ForceOnly::from_value(opts)?;
-            unlink_async(path.as_path(), opts).await
+            Ok(op_table(lua, unlink_async(path.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "chmod",
-        lua.create_async_function(|_, (path, mode, opts): (Value, u32, Value)| async move {
+        lua.create_async_function(|lua, (path, mode, opts): (Value, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
-            chmod_async(path.as_path(), mode, opts).await
+            Ok(op_table(lua, chmod_async(path.as_path(), mode, opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "chown",
-        lua.create_async_function(|_, (path, uid, gid, opts): (Value, u32, u32, Value)| async move {
+        lua.create_async_function(|lua, (path, uid, gid, opts): (Value, u32, u32, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = RecursiveForce::from_value(opts)?;
-            chown_async(path.as_path(), uid, gid, opts).await
+            Ok(op_table(lua, chown_async(path.as_path(), uid, gid, opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "rename",
-        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
+        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            rename_async(old.as_path(), new.as_path(), opts).await
+            Ok(op_table(lua, rename_async(old.as_path(), new.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "link",
-        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
+        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            link_async(old.as_path(), new.as_path(), opts).await
+            Ok(op_table(lua, link_async(old.as_path(), new.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "symlink",
-        lua.create_async_function(|_, (old_path, new_path, opts): (Value, Value, Value)| async move {
+        lua.create_async_function(|lua, (old_path, new_path, opts): (Value, Value, Value)| async move {
             let old = value_to_path_buf(old_path)?;
             let new = value_to_path_buf(new_path)?;
             let opts = ForceOnly::from_value(opts)?;
-            symlink_path_async(old.as_path(), new.as_path(), opts).await
+            Ok(op_table(lua, symlink_path_async(old.as_path(), new.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "touch",
-        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
+        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = TouchOpts::from_value(opts)?;
-            touch_async(path.as_path(), opts).await
+            Ok(op_table(lua, touch_async(path.as_path(), opts).await)?)
         })?,
     )?;
 
@@ -307,7 +334,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
     fs_table.set(
         "write",
-        lua.create_async_function(|_, (path, data, opts): (Value, mlua::Value, Value)| async move {
+        lua.create_async_function(|lua, (path, data, opts): (Value, mlua::Value, Value)| async move {
             let path = value_to_path_buf(path)?;
             let opts = WriteOpts::from_value(opts)?;
 
@@ -318,27 +345,27 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 value_to_string(data)?.into_bytes()
             };
 
-            write_async(path.as_path(), bytes, opts).await
+            Ok(op_table(lua, write_async(path.as_path(), bytes, opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "copy",
-        lua.create_async_function(|_, (from, to, opts): (Value, Value, Value)| async move {
+        lua.create_async_function(|lua, (from, to, opts): (Value, Value, Value)| async move {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
-            copy_async(from.as_path(), to.as_path(), opts).await
+            Ok(op_table(lua, copy_async(from.as_path(), to.as_path(), opts).await)?)
         })?,
     )?;
 
     fs_table.set(
         "move",
-        lua.create_async_function(|_, (from, to, opts): (Value, Value, Value)| async move {
+        lua.create_async_function(|lua, (from, to, opts): (Value, Value, Value)| async move {
             let from = value_to_path_buf(from)?;
             let to = value_to_path_buf(to)?;
             let opts = ForceOnly::from_value(opts)?;
-            rename_async(from.as_path(), to.as_path(), opts).await
+            Ok(op_table(lua, rename_async(from.as_path(), to.as_path(), opts).await)?)
         })?,
     )?;
 
@@ -408,21 +435,27 @@ async fn can_open_async(path: &Path, read: bool, write: bool) -> bool {
     opts.open(path).await.is_ok()
 }
 
-async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
+async fn mkdir_async(path: &Path, options: MkdirOpts) -> OpOutcome {
     let target = path.to_path_buf();
 
     if exists_async(&target).await {
-        let meta = tokio::fs::symlink_metadata(&target).await;
-        if let Ok(meta) = meta {
-            if meta.is_dir() {
-                return Ok(true);
-            }
+        match tokio::fs::symlink_metadata(&target).await {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    return OpOutcome::ok();
+                }
 
-            if options.force {
-                // Works for files and symlinks.
-                let _ = tokio::fs::remove_file(&target).await;
-            } else {
-                return Ok(false);
+                if options.force {
+                    // Works for files and symlinks.
+                    let _ = tokio::fs::remove_file(&target).await;
+                } else {
+                    return OpOutcome::fail_msg("path exists and is not a directory");
+                }
+            }
+            Err(e) => {
+                if !options.force {
+                    return OpOutcome::fail(e);
+                }
             }
         }
     }
@@ -433,8 +466,12 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
         tokio::fs::create_dir(&target).await
     };
 
-    if res.is_err() {
-        return Ok(options.force && exists_async(&target).await);
+    if let Err(e) = res {
+        // If force and the path exists after the failure, treat as success.
+        if options.force && exists_async(&target).await {
+            return OpOutcome::ok();
+        }
+        return OpOutcome::fail(e);
     }
 
     #[cfg(unix)]
@@ -444,23 +481,35 @@ async fn mkdir_async(path: &Path, options: MkdirOpts) -> mlua::Result<bool> {
             && let Some(mode) = options.mode
         {
             let perms = std::fs::Permissions::from_mode(mode);
-            tokio::fs::set_permissions(&target, perms).await.ok();
+            let _ = tokio::fs::set_permissions(&target, perms).await;
         }
     }
 
-    Ok(true)
+    OpOutcome::ok()
 }
 
-async fn rm_async(path: &Path, options: RemoveOpts) -> mlua::Result<bool> {
+async fn rm_async(path: &Path, options: RemoveOpts) -> OpOutcome {
     let target = path.to_path_buf();
 
     if !exists_async(&target).await {
-        return Ok(options.force);
+        return if options.force {
+            OpOutcome::ok()
+        } else {
+            OpOutcome::fail_msg("path not found")
+        };
     }
 
-    let Ok(meta) = tokio::fs::symlink_metadata(&target).await else {
-        return Ok(options.force);
+    let meta = match tokio::fs::symlink_metadata(&target).await {
+        Ok(m) => m,
+        Err(e) => {
+            return if options.force {
+                OpOutcome::ok()
+            } else {
+                OpOutcome::fail(e)
+            };
+        }
     };
+
     let ft = meta.file_type();
     let is_dir = ft.is_dir();
     let is_symlink = ft.is_symlink();
@@ -476,101 +525,116 @@ async fn rm_async(path: &Path, options: RemoveOpts) -> mlua::Result<bool> {
     };
 
     match res {
-        Ok(()) => Ok(true),
-        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(_) => Ok(false),
+        Ok(()) => OpOutcome::ok(),
+        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => OpOutcome::ok(),
+        Err(e) => OpOutcome::fail(e),
     }
 }
 
-async fn unlink_async(path: &Path, options: ForceOnly) -> mlua::Result<bool> {
-    let res = tokio::fs::remove_file(path).await;
-    match res {
-        Ok(()) => Ok(true),
-        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(_) => Ok(false),
+async fn unlink_async(path: &Path, options: ForceOnly) -> OpOutcome {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => OpOutcome::ok(),
+        Err(e) if options.force && e.kind() == std::io::ErrorKind::NotFound => OpOutcome::ok(),
+        Err(e) => OpOutcome::fail(e),
     }
 }
 
-async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> mlua::Result<bool> {
-    let target = path.to_path_buf();
-    let mut success = true;
+async fn chmod_async(path: &Path, mode: u32, options: RecursiveForce) -> OpOutcome {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode, options);
+        return OpOutcome::ok();
+    }
 
     #[cfg(unix)]
-    let perms = std::fs::Permissions::from_mode(mode);
+    {
+        let target = path.to_path_buf();
+        let mut success = true;
+        let mut first_err: Option<String> = None;
+        let perms = std::fs::Permissions::from_mode(mode);
 
-    if options.recursive {
-        let mut queue = VecDeque::from([target]);
-        while let Some(current) = queue.pop_front() {
-            if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
-                && meta.is_dir()
-                && let Ok(mut rd) = tokio::fs::read_dir(&current).await
-            {
-                while let Ok(Some(ent)) = rd.next_entry().await {
-                    let p = ent.path();
-                    let ft = ent.file_type().await.ok();
-                    if let Some(ft) = ft {
-                        if ft.is_symlink() {
-                            continue;
+        if options.recursive {
+            let mut queue = VecDeque::from([target]);
+            while let Some(current) = queue.pop_front() {
+                if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
+                    && meta.is_dir()
+                    && let Ok(mut rd) = tokio::fs::read_dir(&current).await
+                {
+                    while let Ok(Some(ent)) = rd.next_entry().await {
+                        let p = ent.path();
+                        let ft = ent.file_type().await.ok();
+                        if let Some(ft) = ft {
+                            if ft.is_symlink() {
+                                continue;
+                            }
+                            if ft.is_dir() {
+                                queue.push_back(p.clone());
+                            }
                         }
-                        if ft.is_dir() {
-                            queue.push_back(p.clone());
-                        }
-                    }
 
-                    #[cfg(unix)]
-                    {
-                        if tokio::fs::set_permissions(&p, perms.clone()).await.is_err() {
+                        if let Err(e) = tokio::fs::set_permissions(&p, perms.clone()).await {
                             success = false;
+                            first_err.get_or_insert_with(|| e.to_string());
                             if !options.force {
-                                return Ok(false);
+                                return OpOutcome::fail(e);
                             }
                         }
                     }
                 }
-            }
 
-            // Avoid mutating symlink targets in recursive chmod.
-            if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
-                && meta.file_type().is_symlink()
-            {
-                continue;
-            }
+                // Avoid mutating symlink targets in recursive chmod.
+                if let Ok(meta) = tokio::fs::symlink_metadata(&current).await
+                    && meta.file_type().is_symlink()
+                {
+                    continue;
+                }
 
-            #[cfg(unix)]
-            {
-                if tokio::fs::set_permissions(&current, perms.clone()).await.is_err() {
+                if let Err(e) = tokio::fs::set_permissions(&current, perms.clone()).await {
                     success = false;
+                    first_err.get_or_insert_with(|| e.to_string());
                     if !options.force {
-                        return Ok(false);
+                        return OpOutcome::fail(e);
                     }
                 }
             }
-        }
-    } else {
-        if let Ok(meta) = tokio::fs::symlink_metadata(&target).await
-            && meta.file_type().is_symlink()
-        {
-            // WARN: For safety, we do not follow symlinks.
-            return Ok(options.force);
-        }
+        } else {
+            if let Ok(meta) = tokio::fs::symlink_metadata(&target).await
+                && meta.file_type().is_symlink()
+            {
+                // WARN: For safety, we do not follow symlinks.
+                return if options.force { OpOutcome::ok() } else { OpOutcome::fail_msg("refusing to chmod symlink") };
+            }
 
-        #[cfg(unix)]
-        {
-            if tokio::fs::set_permissions(&target, perms).await.is_err() && !options.force {
+            if let Err(e) = tokio::fs::set_permissions(&target, perms).await {
                 success = false;
+                first_err.get_or_insert_with(|| e.to_string());
+                if !options.force {
+                    return OpOutcome::fail(e);
+                }
             }
         }
-    }
 
-    Ok(success)
+        if success {
+            OpOutcome::ok()
+        } else {
+            OpOutcome { ok: false, err: first_err }
+        }
+    }
 }
 
-async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -> mlua::Result<bool> {
-    let target = path.to_path_buf();
-    let mut success = true;
+async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -> OpOutcome {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, uid, gid, options);
+        return OpOutcome::ok();
+    }
 
     #[cfg(unix)]
     {
+        let target = path.to_path_buf();
+        let mut success = true;
+        let mut first_err: Option<String> = None;
+
         let owner = Some(Uid::from_raw(uid));
         let group = Some(Gid::from_raw(gid));
         let apply = |p: &Path| nix_chown(p, owner, group);
@@ -594,10 +658,11 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
                             }
                         }
 
-                        if apply(&p).is_err() {
+                        if let Err(e) = apply(&p) {
                             success = false;
+                            first_err.get_or_insert_with(|| e.to_string());
                             if !options.force {
-                                return Ok(false);
+                                return OpOutcome::fail(e);
                             }
                         }
                     }
@@ -610,10 +675,11 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
                     continue;
                 }
 
-                if apply(&current).is_err() {
+                if let Err(e) = apply(&current) {
                     success = false;
+                    first_err.get_or_insert_with(|| e.to_string());
                     if !options.force {
-                        return Ok(false);
+                        return OpOutcome::fail(e);
                     }
                 }
             }
@@ -621,16 +687,21 @@ async fn chown_async(path: &Path, uid: u32, gid: u32, options: RecursiveForce) -
             && meta.file_type().is_symlink()
         {
             // WARN: For safety, we do not follow symlinks.
-            return Ok(options.force);
-        } else if apply(&target).is_err() && !options.force {
+            return if options.force { OpOutcome::ok() } else { OpOutcome::fail_msg("refusing to chown symlink") };
+        } else if let Err(e) = apply(&target) {
             success = false;
+            first_err.get_or_insert_with(|| e.to_string());
+            if !options.force {
+                return OpOutcome::fail(e);
+            }
+        }
+
+        if success {
+            OpOutcome::ok()
+        } else {
+            OpOutcome { ok: false, err: first_err }
         }
     }
-
-    #[cfg(not(unix))]
-    let _ = (path, uid, gid);
-
-    Ok(success)
 }
 
 async fn maybe_force_remove(dest: &Path) {
@@ -650,21 +721,27 @@ async fn maybe_force_remove(dest: &Path) {
     let _ = tokio::fs::remove_dir_all(dest).await;
 }
 
-async fn rename_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> mlua::Result<bool> {
+async fn rename_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> OpOutcome {
     if options.force && exists_async(new_path).await {
         maybe_force_remove(new_path).await;
     }
-    Ok(tokio::fs::rename(old_path, new_path).await.is_ok())
+    match tokio::fs::rename(old_path, new_path).await {
+        Ok(()) => OpOutcome::ok(),
+        Err(e) => OpOutcome::fail(e),
+    }
 }
 
-async fn link_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> mlua::Result<bool> {
+async fn link_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> OpOutcome {
     if options.force && exists_async(new_path).await {
         maybe_force_remove(new_path).await;
     }
-    Ok(tokio::fs::hard_link(old_path, new_path).await.is_ok())
+    match tokio::fs::hard_link(old_path, new_path).await {
+        Ok(()) => OpOutcome::ok(),
+        Err(e) => OpOutcome::fail(e),
+    }
 }
 
-async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> mlua::Result<bool> {
+async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly) -> OpOutcome {
     let source = old_path.to_path_buf();
     let dest = new_path.to_path_buf();
 
@@ -674,16 +751,22 @@ async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly
 
     #[cfg(any(unix, target_os = "windows"))]
     {
-        let ok = tokio::task::spawn_blocking(move || symlink_platform(&source, &dest).is_ok())
-            .await
-            .map_err(mlua::Error::external)?;
-        Ok(ok)
+        let res = tokio::task::spawn_blocking(move || symlink(source, dest)).await;
+        return match res {
+            Ok(Ok(())) => OpOutcome::ok(),
+            Ok(Err(e)) => OpOutcome::fail(e),
+            Err(e) => OpOutcome::fail(e),
+        };
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
     {
         let _ = (source, dest);
-        Ok(options.force)
+        return if options.force {
+            OpOutcome::ok()
+        } else {
+            OpOutcome::fail_msg("symlink is not supported on this platform")
+        };
     }
 }
 
@@ -715,7 +798,7 @@ fn basename(path: &Path) -> String {
         .into_owned()
 }
 
-async fn touch_async(path: &Path, options: TouchOpts) -> mlua::Result<bool> {
+async fn touch_async(path: &Path, options: TouchOpts) -> OpOutcome {
     let target = path.to_path_buf();
 
     if options.recursive
@@ -725,26 +808,36 @@ async fn touch_async(path: &Path, options: TouchOpts) -> mlua::Result<bool> {
     }
 
     if !exists_async(&target).await {
-        let res = tokio::fs::OpenOptions::new()
+        match tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&target)
-            .await;
-        if res.is_err() && !options.force {
-            return Ok(false);
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                return if options.force {
+                    OpOutcome::fail(e)
+                } else {
+                    OpOutcome::fail(e)
+                };
+            }
         }
     }
 
     // filetime is sync; run in blocking pool
-    let ok = tokio::task::spawn_blocking(move || {
+    let res = tokio::task::spawn_blocking(move || {
         let now = FileTime::from_system_time(SystemTime::now());
-        filetime::set_file_times(&target, now, now).is_ok()
+        filetime::set_file_times(&target, now, now)
     })
-    .await
-    .map_err(mlua::Error::external)?;
+    .await;
 
-    Ok(ok)
+    match res {
+        Ok(Ok(())) => OpOutcome::ok(),
+        Ok(Err(e)) => OpOutcome::fail(e),
+        Err(e) => OpOutcome::fail(e),
+    }
 }
 
 async fn read_async(path: &Path, options: ReadOpts) -> mlua::Result<Vec<u8>> {
@@ -755,73 +848,73 @@ async fn read_async(path: &Path, options: ReadOpts) -> mlua::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn write_async(path: &Path, bytes: Vec<u8>, options: WriteOpts) -> mlua::Result<bool> {
+async fn write_async(path: &Path, bytes: Vec<u8>, options: WriteOpts) -> OpOutcome {
     match options.mode {
         WriteMode::Overwrite => {
-            let mut f = tokio::fs::OpenOptions::new()
+            let open_res = tokio::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
                 .create(true)
                 .open(path)
-                .await
-                .map_err(mlua::Error::external)?;
+                .await;
+
+            let mut f = match open_res {
+                Ok(f) => f,
+                Err(e) => return OpOutcome::fail(e),
+            };
+
             match f.write_all(&bytes).await {
-                Ok(()) => Ok(true),
-                Err(e) => {
-                    if options.force {
-                        Ok(false)
-                    } else {
-                        Err(mlua::Error::external(e))
-                    }
-                }
+                Ok(()) => OpOutcome::ok(),
+                Err(e) => OpOutcome::fail(e),
             }
         }
         WriteMode::Append => {
-            let mut f = tokio::fs::OpenOptions::new()
+            let open_res = tokio::fs::OpenOptions::new()
                 .write(true)
                 .append(true)
                 .create(true)
                 .open(path)
-                .await
-                .map_err(mlua::Error::external)?;
+                .await;
+
+            let mut f = match open_res {
+                Ok(f) => f,
+                Err(e) => return OpOutcome::fail(e),
+            };
+
             match f.write_all(&bytes).await {
-                Ok(()) => Ok(true),
-                Err(e) => {
-                    if options.force {
-                        Ok(false)
-                    } else {
-                        Err(mlua::Error::external(e))
-                    }
-                }
+                Ok(()) => OpOutcome::ok(),
+                Err(e) => OpOutcome::fail(e),
             }
         }
         WriteMode::Prepend => {
             let existing = if exists_async(path).await {
                 match tokio::fs::read(path).await {
                     Ok(v) => v,
-                    Err(e) => {
-                        return if options.force {
-                            Ok(false)
-                        } else {
-                            Err(mlua::Error::external(e))
-                        };
-                    }
+                    Err(e) => return OpOutcome::fail(e),
                 }
             } else {
                 Vec::new()
             };
 
-            let mut f = tokio::fs::OpenOptions::new()
+            let open_res = tokio::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
                 .create(true)
                 .open(path)
-                .await
-                .map_err(mlua::Error::external)?;
+                .await;
 
-            f.write_all(&bytes).await.map_err(mlua::Error::external)?;
-            f.write_all(&existing).await.map_err(mlua::Error::external)?;
-            Ok(true)
+            let mut f = match open_res {
+                Ok(f) => f,
+                Err(e) => return OpOutcome::fail(e),
+            };
+
+            if let Err(e) = f.write_all(&bytes).await {
+                return OpOutcome::fail(e);
+            }
+            if let Err(e) = f.write_all(&existing).await {
+                return OpOutcome::fail(e);
+            }
+            OpOutcome::ok()
         }
     }
 }
@@ -879,11 +972,14 @@ async fn list_async(path: &Path, options: ListOpts) -> mlua::Result<Vec<String>>
     Ok(entries)
 }
 
-async fn copy_async(from: &Path, to: &Path, options: ForceOnly) -> mlua::Result<bool> {
+async fn copy_async(from: &Path, to: &Path, options: ForceOnly) -> OpOutcome {
     if options.force && exists_async(to).await {
         maybe_force_remove(to).await;
     }
-    Ok(tokio::fs::copy(from, to).await.is_ok())
+    match tokio::fs::copy(from, to).await {
+        Ok(_) => OpOutcome::ok(),
+        Err(e) => OpOutcome::fail(e),
+    }
 }
 
 fn join(path: PathBuf, rest: mlua::Variadic<Value>) -> mlua::Result<String> {
