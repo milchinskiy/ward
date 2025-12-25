@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering},
     },
 };
 use tokio::sync::broadcast;
@@ -96,6 +96,8 @@ struct LifecycleManager {
     // shutdown request flag + suggested exit code
     shutdown_requested: Arc<AtomicBool>,
     shutdown_code: Arc<AtomicI32>,
+    // shutdown origin (0 = unknown, 1 = requested, 2 = signal)
+    shutdown_origin: Arc<AtomicU8>,
 
     // shutdown run-once
     shutdown_ran: Arc<AtomicBool>,
@@ -119,6 +121,7 @@ impl LifecycleManager {
             ids: Arc::new(Mutex::new(HashMap::new())),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             shutdown_code: Arc::new(AtomicI32::new(0)),
+            shutdown_origin: Arc::new(AtomicU8::new(0)),
             shutdown_ran: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -171,10 +174,19 @@ impl LifecycleManager {
         }
     }
 
-    fn request_shutdown(&self, code: Option<i32>) {
+    fn request_shutdown(&self, origin: ShutdownReason, code: Option<i32>) {
         self.shutdown_requested.store(true, Ordering::SeqCst);
         if let Some(c) = code {
             self.shutdown_code.store(c, Ordering::SeqCst);
+        }
+
+        let v = match origin {
+            ShutdownReason::Requested => 1,
+            ShutdownReason::Signal => 2,
+            _ => 0,
+        };
+        if v != 0 {
+            let _ = self.shutdown_origin.compare_exchange(0, v, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 
@@ -187,6 +199,17 @@ impl LifecycleManager {
             Some(self.shutdown_code.load(Ordering::SeqCst))
         } else {
             None
+        }
+    }
+
+    fn origin(&self) -> Option<ShutdownReason> {
+        if !self.requested() {
+            return None;
+        }
+        match self.shutdown_origin.load(Ordering::SeqCst) {
+            1 => Some(ShutdownReason::Requested),
+            2 => Some(ShutdownReason::Signal),
+            _ => None,
         }
     }
 }
@@ -264,7 +287,7 @@ pub fn tick(lua: &Lua) -> mlua::Result<()> {
 
         // Default behavior: INT/TERM requests shutdown.
         if ev.number == 2 || ev.number == 15 {
-            mgr.request_shutdown(Some(128 + ev.number));
+            mgr.request_shutdown(ShutdownReason::Signal, Some(128 + ev.number));
         }
     }
 
@@ -289,8 +312,24 @@ pub fn request_shutdown(lua: &Lua, code: Option<i32>) -> mlua::Result<()> {
         return Ok(());
     };
     mgr.ensure_started();
-    mgr.request_shutdown(code);
+    mgr.request_shutdown(ShutdownReason::Requested, code);
     Ok(())
+}
+
+/// Request shutdown because an external signal / Ctrl-C occurred.
+/// # Errors [`mlua::Error`]
+pub fn request_shutdown_signal(lua: &Lua, code: Option<i32>) -> mlua::Result<()> {
+    let Some(mgr) = get_mgr(lua) else {
+        return Ok(());
+    };
+    mgr.ensure_started();
+    mgr.request_shutdown(ShutdownReason::Signal, code);
+    Ok(())
+}
+
+#[must_use]
+pub fn shutdown_origin(lua: &Lua) -> Option<ShutdownReason> {
+    get_mgr(lua).and_then(|m| m.origin())
 }
 
 /// Run shutdown callbacks once (safe to call multiple times).
@@ -485,7 +524,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             let mgr = lua
                 .app_data_ref::<LifecycleManager>()
                 .ok_or_else(|| mlua::Error::RuntimeError("LifecycleManager missing".into()))?;
-            mgr.request_shutdown(code);
+            mgr.request_shutdown(ShutdownReason::Requested, code);
             drop(mgr);
             Ok(())
         })?,

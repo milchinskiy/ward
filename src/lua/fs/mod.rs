@@ -834,10 +834,15 @@ async fn list_async(path: &Path, options: ListOpts) -> mlua::Result<Vec<String>>
                 let is_dir = ft.as_ref().is_some_and(std::fs::FileType::is_dir);
                 let is_symlink = ft.as_ref().is_some_and(std::fs::FileType::is_symlink);
 
-                if is_dir && !is_symlink {
-                    queue.push_back((p.clone(), depth + 1));
+                // Depth is measured from the root dir's *children* as depth=1.
+                // When a max depth is set, we must not include entries beyond it.
+                let next_depth = depth.saturating_add(1);
+                let within_depth = options.depth == 0 || next_depth <= options.depth;
+
+                if is_dir && !is_symlink && within_depth {
+                    queue.push_back((p.clone(), next_depth));
                 }
-                if should_include(&p, is_dir, &options) {
+                if within_depth && should_include(&p, is_dir, &options) {
                     entries.push(p.to_string_lossy().into_owned());
                 }
             }
@@ -981,7 +986,7 @@ impl MkdirOpts {
         if let mlua::Value::Table(table) = value {
             Ok(Self {
                 recursive: table.get::<Option<bool>>("recursive")?.unwrap_or(false),
-                mode: table.get::<Option<u32>>("mode")?,
+                mode: table.get::<Option<u32>>("mode")?.or(Some(0o755)),
                 force: table.get::<Option<bool>>("force")?.unwrap_or(false),
             })
         } else {

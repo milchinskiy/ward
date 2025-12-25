@@ -3,7 +3,6 @@ pub enum Error {
     Io(std::io::Error),
     Lua(mlua::Error),
     Timeout(String),
-    Tokio(tokio::time::error::Error),
 }
 
 impl core::fmt::Display for Error {
@@ -12,7 +11,6 @@ impl core::fmt::Display for Error {
             Self::Io(e) => e.fmt(f),
             Self::Lua(e) => e.fmt(f),
             Self::Timeout(e) => e.fmt(f),
-            Self::Tokio(e) => e.fmt(f),
         }
     }
 }
@@ -34,11 +32,5 @@ impl From<mlua::Error> for Error {
 impl From<tokio::time::error::Elapsed> for Error {
     fn from(_: tokio::time::error::Elapsed) -> Self {
         Self::Timeout("evaluation timed out".to_string())
-    }
-}
-
-impl From<tokio::time::error::Error> for Error {
-    fn from(e: tokio::time::error::Error) -> Self {
-        Self::Tokio(e)
     }
 }

@@ -18,10 +18,9 @@ const TICK_EVERY: u32 = 1024;
 pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     let libs = StdLib::PACKAGE | StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
     let lua_options = LuaOptions::new().thread_pool_size(policy.thread_pool_size);
-    let lua = Lua::new_with(libs, lua_options).map_err(crate::Error::from)?;
+    let lua = Lua::new_with(libs, lua_options)?;
 
-    lua.set_memory_limit(policy.memory_limit_bytes)
-        .map_err(crate::Error::from)?;
+    lua.set_memory_limit(policy.memory_limit_bytes)?;
 
     // Strict instruction limiting: never exceed the configured limit.
     let remaining = Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit));
@@ -92,25 +91,25 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
         res = async {
             if let Some(timeout) = policy.timeout {
                 match tokio::time::timeout(timeout, evaluator).await {
-                    Ok(res) => res.map_err(crate::Error::from),
+                    Ok(res) => res.map_err(Into::into),
                     Err(e) => Err(e.into()),
                 }
             } else {
-                evaluator.await.map_err(crate::Error::from)
+                evaluator.await.map_err(Into::into)
             }
         } => res,
         _ = tokio::signal::ctrl_c() => {
             // Match common shell convention: 128 + SIGINT(2) = 130.
-            let _ = crate::lua::lifecycle::request_shutdown(lua, Some(130));
+            let _ = crate::lua::lifecycle::request_shutdown_signal(lua, Some(130));
             Err(crate::Error::from(mlua::Error::external("interrupted")))
         }
     };
 
     // Decide a reason for shutdown callbacks.
-    let reason = if crate::lua::lifecycle::shutdown_requested(lua) {
-        crate::lua::lifecycle::ShutdownReason::Signal
-    } else if matches!(exec_res, Err(crate::Error::Timeout(_))) {
+    let reason = if matches!(exec_res, Err(crate::Error::Timeout(_))) {
         crate::lua::lifecycle::ShutdownReason::Timeout
+    } else if crate::lua::lifecycle::shutdown_requested(lua) {
+        crate::lua::lifecycle::shutdown_origin(lua).unwrap_or(crate::lua::lifecycle::ShutdownReason::Requested)
     } else if exec_res.is_err() {
         crate::lua::lifecycle::ShutdownReason::Error
     } else {
