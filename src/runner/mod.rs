@@ -3,7 +3,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::Ordering,
     },
 };
 use tokio::fs;
@@ -11,7 +11,7 @@ use tokio::fs;
 pub mod sandbox;
 use sandbox::SandboxPolicy;
 
-const TICK_EVERY: u32 = 1024;
+const HOOK_STRIDE: u32 = 1024;
 
 /// Runs a lua file
 /// # Errors [`crate::Error`]
@@ -21,40 +21,9 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     let lua = Lua::new_with(libs, lua_options)?;
 
     lua.set_memory_limit(policy.memory_limit_bytes)?;
-
-    // Strict instruction limiting: never exceed the configured limit.
-    let remaining = Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit));
-    let tick_counter = Arc::new(AtomicU32::new(0));
-    {
-        let remaining = remaining.clone();
-        let tick_counter = tick_counter.clone();
-        lua.set_hook(
-            HookTriggers {
-                #[allow(clippy::cast_possible_truncation)]
-                every_nth_instruction: Some(1),
-                ..HookTriggers::default()
-            },
-            move |lua, _debug| {
-                let left_after = remaining
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| cur.checked_sub(1))
-                    .map(|prev| prev - 1)
-                    .unwrap_or(0);
-
-                if left_after == 0 {
-                    return Err(mlua::Error::external("instruction limit exceeded"));
-                }
-
-                // Drain pending signals and interrupt execution if shutdown requested.
-                // This must be fast and non-blocking.
-                // We do it only periodically to reduce per-instruction overhead.
-                let c = tick_counter.fetch_add(1, Ordering::Relaxed);
-                if (c & (TICK_EVERY - 1)) == (TICK_EVERY - 1) {
-                    crate::lua::lifecycle::tick(lua)?;
-                }
-                Ok(VmState::Continue)
-            },
-        )?;
-    }
+    // NOTE: the script is executed inside a Lua coroutine when using `exec_async()`,
+    // therefore instruction hooks must be installed on the coroutine that executes the chunk.
+    // Hook installation happens in `evaluate()`.
 
     let mut lua_content = fs::read_to_string(path).await?;
     // drop shebang if present
@@ -78,12 +47,62 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     let env = lua.globals();
     populate_env(lua, &env, policy)?;
 
-    let evaluator = lua
+    // Approximate instruction limiting: the VM hook runs every HOOK_STRIDE instructions (or less),
+    // so the script may exceed the configured limit by up to (hook_stride - 1) instructions.
+    // This trades strictness for significantly lower overhead.
+    //
+    // WARN: Lua hooks are per-thread. `exec_async()` executes the chunk inside a coroutine,
+    // so the hook must be installed on that coroutine (not only on the main Lua thread).
+    let hook_stride: u32 = if policy.instruction_limit == u64::MAX {
+        HOOK_STRIDE
+    } else {
+        // If a small limit is configured, keep the hook at or below that limit.
+        let s = policy.instruction_limit.min(u64::from(HOOK_STRIDE));
+        if s == 0 { 1 } else { u32::try_from(s).unwrap_or(u32::MAX) }
+    };
+
+    let remaining: Option<Arc<std::sync::atomic::AtomicU64>> = if policy.instruction_limit == u64::MAX {
+        None
+    } else {
+        Some(Arc::new(std::sync::atomic::AtomicU64::new(policy.instruction_limit)))
+    };
+
+    let func = lua
         .load(content)
         .set_name(name)
         .set_mode(ChunkMode::Text)
         .set_environment(env)
-        .exec_async();
+        .into_function()?;
+
+    let thread = lua.create_thread(func)?;
+
+    {
+        let remaining = remaining.clone();
+        let step = u64::from(hook_stride);
+        thread.set_hook(
+            HookTriggers {
+                every_nth_instruction: Some(hook_stride),
+                ..HookTriggers::default()
+            },
+            move |lua, _debug| {
+                if let Some(ref remaining) = remaining {
+                    let prev = remaining.fetch_sub(step, Ordering::Relaxed);
+                    if prev <= step {
+                        // Prevent wrap-around on underflow (defensive; we are about to error anyway).
+                        remaining.store(0, Ordering::Relaxed);
+                        return Err(mlua::Error::external("instruction limit exceeded"));
+                    }
+                }
+
+                // Drain pending signals and interrupt execution if shutdown requested.
+                // The hook itself is already coarse, so do this on every hook call.
+                crate::lua::lifecycle::tick(lua)?;
+                Ok(VmState::Continue)
+            },
+        )?;
+    }
+
+    let evaluator = thread.into_async::<()>(())?;
 
     // NOTE: the VM instruction hook does not execute while awaiting Rust async operations.
     // Handle Ctrl-C here so scripts can be interrupted even when blocked on I/O.
