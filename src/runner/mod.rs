@@ -1,10 +1,7 @@
 use mlua::{ChunkMode, HookTriggers, Lua, LuaOptions, StdLib, VmState};
 use std::{
     path::Path,
-    sync::{
-        Arc,
-        atomic::Ordering,
-    },
+    sync::{Arc, atomic::Ordering},
 };
 use tokio::fs;
 
@@ -58,7 +55,11 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     } else {
         // If a small limit is configured, keep the hook at or below that limit.
         let s = policy.instruction_limit.min(u64::from(HOOK_STRIDE));
-        if s == 0 { 1 } else { u32::try_from(s).unwrap_or(u32::MAX) }
+        if s == 0 {
+            1
+        } else {
+            u32::try_from(s).unwrap_or(u32::MAX)
+        }
     };
 
     let remaining: Option<Arc<std::sync::atomic::AtomicU64>> = if policy.instruction_limit == u64::MAX {
@@ -137,11 +138,22 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
 
     let error = exec_res.as_ref().err().map(std::string::ToString::to_string);
     let shut_res = crate::lua::lifecycle::run_shutdown(lua, reason, error);
-    match (exec_res, shut_res) {
+    let mut out: crate::Result = match (exec_res, shut_res) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(e)) => Err(e.into()),
         (Err(e), _) => Err(e),
+    };
+
+    // If the VM asked for shutdown with a non-zero exit code, prefer that over a generic error.
+    if out.is_err()
+        && crate::lua::lifecycle::shutdown_requested(lua)
+        && let Some(code) = crate::lua::lifecycle::shutdown_code(lua)
+        && code != 0
+    {
+        out = Err(crate::Error::Exit(code));
     }
+
+    out
 }
 
 #[allow(unused_variables, clippy::missing_const_for_fn, clippy::unnecessary_wraps)]

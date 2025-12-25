@@ -352,6 +352,11 @@ pub fn shutdown_origin(lua: &Lua) -> Option<ShutdownReason> {
     get_mgr(lua).and_then(|m| m.origin())
 }
 
+#[must_use]
+pub fn shutdown_code(lua: &Lua) -> Option<i32> {
+    get_mgr(lua).and_then(|m| m.code())
+}
+
 /// Run shutdown callbacks once (safe to call multiple times).
 /// `error` is optional string context (e.g. script error message).
 /// # Errors [`mlua::Error`]

@@ -3,6 +3,7 @@ pub enum Error {
     Io(std::io::Error),
     Lua(mlua::Error),
     Timeout(String),
+    Exit(i32),
 }
 
 impl core::fmt::Display for Error {
@@ -11,6 +12,7 @@ impl core::fmt::Display for Error {
             Self::Io(e) => e.fmt(f),
             Self::Lua(e) => e.fmt(f),
             Self::Timeout(e) => e.fmt(f),
+            Self::Exit(e) => write!(f, "exit code: {e}"),
         }
     }
 }

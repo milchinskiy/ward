@@ -23,7 +23,11 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
         )
         .opt(
             ap::OptSpec::value("memory-limit", |value, ctx: &mut super::Context| {
-                ctx.run.memory_limit = Some(value.to_string_lossy().parse().map_err(ap::Error::user)?);
+                let v: usize = value.to_string_lossy().parse().map_err(ap::Error::user)?;
+                if v == 0 {
+                    return Err(ap::Error::User("Memory limit must be greater than 0".into()));
+                }
+                ctx.run.memory_limit = Some(v);
                 Ok(())
             })
             .long("memory-limit")
@@ -33,7 +37,11 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
         )
         .opt(
             ap::OptSpec::value("instruction-limit", |value, ctx: &mut super::Context| {
-                ctx.run.instruction_limit = Some(value.to_string_lossy().parse().map_err(ap::Error::user)?);
+                let v: u64 = value.to_string_lossy().parse().map_err(ap::Error::user)?;
+                if v == 0 {
+                    return Err(ap::Error::User("Instruction limit must be greater than 0".into()));
+                }
+                ctx.run.instruction_limit = Some(v);
                 Ok(())
             })
             .long("instruction-limit")
@@ -43,7 +51,11 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
         )
         .opt(
             ap::OptSpec::value("threads", |value, ctx: &mut super::Context| {
-                ctx.run.thread_pool_size = Some(value.to_string_lossy().parse().map_err(ap::Error::user)?);
+                let v: usize = value.to_string_lossy().parse().map_err(ap::Error::user)?;
+                if v == 0 {
+                    return Err(ap::Error::User("Thread pool size must be greater than 0".into()));
+                }
+                ctx.run.thread_pool_size = Some(v);
                 Ok(())
             })
             .long("threads")
@@ -89,8 +101,10 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
                 timeout: ctx.run.timeout,
             };
             let local = LocalSet::new();
-            local
-                .block_on(&runtime, ward::runner::run_file(ctx.run.file.as_path(), sandbox))
-                .map_err(ap::Error::user)
+            match local.block_on(&runtime, ward::runner::run_file(ctx.run.file.as_path(), sandbox)) {
+                Ok(()) => Ok(()),
+                Err(ward::Error::Exit(code)) => std::process::exit(code),
+                Err(e) => Err(ap::Error::user(e)),
+            }
         })
 }

@@ -27,7 +27,23 @@ use nix::unistd::{Gid, Uid, chown as nix_chown};
 use std::os::unix::fs::symlink;
 
 #[cfg(target_os = "windows")]
-use std::os::windows::fs::symlink_file as symlink;
+use std::os::windows::fs::{symlink_dir, symlink_file};
+
+#[cfg(unix)]
+fn symlink_platform(source: &Path, dest: &Path) -> std::io::Result<()> {
+    symlink(source, dest)
+}
+
+#[cfg(target_os = "windows")]
+fn symlink_platform(source: &Path, dest: &Path) -> std::io::Result<()> {
+    // Windows differentiates between file and directory symlinks.
+    // Best-effort: detect the source type; if it doesn't exist, fall back to file symlink.
+    match std::fs::metadata(source) {
+        Ok(meta) if meta.is_dir() => symlink_dir(source, dest),
+        Ok(_) => symlink_file(source, dest),
+        Err(_) => symlink_file(source, dest),
+    }
+}
 
 /// Initializes the `fs` module
 /// # Errors [`mlua::Error`]
@@ -658,7 +674,7 @@ async fn symlink_path_async(old_path: &Path, new_path: &Path, options: ForceOnly
 
     #[cfg(any(unix, target_os = "windows"))]
     {
-        let ok = tokio::task::spawn_blocking(move || symlink(source, dest).is_ok())
+        let ok = tokio::task::spawn_blocking(move || symlink_platform(&source, &dest).is_ok())
             .await
             .map_err(mlua::Error::external)?;
         Ok(ok)

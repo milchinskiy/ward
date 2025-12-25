@@ -9,6 +9,13 @@ use std::path::PathBuf;
 /// Falls back to the current directory if neither `XDG_DATA_HOME` nor `HOME` is set.
 #[must_use]
 pub fn data_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")) {
+            return PathBuf::from(local).join("ward");
+        }
+    }
+
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(xdg).join("ward");
     }
