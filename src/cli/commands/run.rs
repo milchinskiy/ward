@@ -4,6 +4,7 @@ use tokio::task::LocalSet;
 #[derive(Default, Debug)]
 pub struct RunContext {
     file: std::path::PathBuf,
+    args: Vec<std::ffi::OsString>,
     memory_limit: Option<usize>,
     instruction_limit: Option<u64>,
     thread_pool_size: Option<usize>,
@@ -15,11 +16,15 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
         .help("Run a lua file")
         .pos(
             ap::PosSpec::new("FILE", |value, ctx: &mut super::Context| {
-                ctx.run.file = std::path::PathBuf::from(value);
+                if ctx.run.file.as_os_str().is_empty() {
+                    ctx.run.file = std::path::PathBuf::from(value);
+                } else {
+                    ctx.run.args.push(value.to_os_string());
+                }
                 Ok(())
             })
-            .help("Lua file to run")
-            .required(),
+            .help("Lua file to run (extra values are forwarded to the script; use -- to terminate CLI parsing)")
+            .range(1, usize::MAX),
         )
         .opt(
             ap::OptSpec::value("memory-limit", |value, ctx: &mut super::Context| {
@@ -101,7 +106,7 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
                 timeout: ctx.run.timeout,
             };
             let local = LocalSet::new();
-            match local.block_on(&runtime, ward::runner::run_file(ctx.run.file.as_path(), sandbox)) {
+            match local.block_on(&runtime, ward::runner::run_file(ctx.run.file.as_path(), &ctx.run.args, sandbox)) {
                 Ok(()) => Ok(()),
                 Err(ward::Error::Exit(code)) => std::process::exit(code),
                 Err(e) => Err(ap::Error::user(e)),

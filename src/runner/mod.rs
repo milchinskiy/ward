@@ -1,5 +1,6 @@
 use mlua::{ChunkMode, HookTriggers, Lua, LuaOptions, StdLib, VmState};
 use std::{
+    ffi::OsString,
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
@@ -12,7 +13,7 @@ const HOOK_STRIDE: u32 = 1024;
 
 /// Runs a lua file
 /// # Errors [`crate::Error`]
-pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
+pub async fn run_file(path: &Path, args: &[OsString], policy: SandboxPolicy) -> crate::Result {
     let libs = StdLib::PACKAGE | StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
     let lua_options = LuaOptions::new().thread_pool_size(policy.thread_pool_size);
     let lua = Lua::new_with(libs, lua_options)?;
@@ -34,15 +35,15 @@ pub async fn run_file(path: &Path, policy: SandboxPolicy) -> crate::Result {
     }
 
     let name = path.to_string_lossy().to_string();
-    evaluate(&lua, &lua_content, name.as_str(), &policy).await
+    evaluate(&lua, &lua_content, name.as_str(), args, &policy).await
 }
 
-async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) -> crate::Result {
+async fn evaluate(lua: &Lua, content: &str, name: &str, args: &[OsString], policy: &SandboxPolicy) -> crate::Result {
     lua.set_app_data(policy.clone());
     populate_modules(lua, policy)?;
 
     let env = lua.globals();
-    populate_env(lua, &env, policy)?;
+    populate_env(lua, &env, name, args)?;
 
     // Approximate instruction limiting: the VM hook runs every HOOK_STRIDE instructions (or less),
     // so the script may exceed the configured limit by up to (hook_stride - 1) instructions.
@@ -163,8 +164,14 @@ async fn evaluate(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) 
     out
 }
 
-#[allow(unused_variables, clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
-fn populate_env(lua: &Lua, env: &mlua::Table, policy: &SandboxPolicy) -> mlua::Result<()> {
+#[allow(clippy::missing_const_for_fn)]
+fn populate_env(lua: &Lua, env: &mlua::Table, script_name: &str, args: &[OsString]) -> mlua::Result<()> {
+    let arg_table = lua.create_table_with_capacity(args.len(), 1)?;
+    arg_table.set(0, script_name)?;
+    for (idx, arg) in args.iter().enumerate() {
+        arg_table.set(idx + 1, arg.to_string_lossy().into_owned())?;
+    }
+    env.set("arg", arg_table)?;
     Ok(())
 }
 
