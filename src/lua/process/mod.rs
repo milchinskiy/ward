@@ -4,6 +4,7 @@ use crate::lua::lifecycle;
 use mlua::{
     Lua, MetaMethod, MultiValue, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic,
 };
+use serde_ext_duration::parse_str as parse_duration_str;
 use std::{
     collections::HashMap,
     fs::File,
@@ -31,6 +32,33 @@ use nix::{
 
 type EnvOverlay = HashMap<String, Option<String>>;
 type BoxRead = Box<dyn AsyncRead + Unpin + Send + 'static>;
+
+#[derive(Clone, Default)]
+struct ShellDefaults {
+    pipefail: bool,
+    timeout_ms: Option<u64>,
+}
+
+fn default_store() -> &'static std::sync::RwLock<ShellDefaults> {
+    static STORE: std::sync::OnceLock<std::sync::RwLock<ShellDefaults>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::RwLock::new(ShellDefaults::default()))
+}
+
+fn shell_defaults_snapshot() -> ShellDefaults {
+    default_store()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn set_shell_defaults(new: ShellDefaults) -> ShellDefaults {
+    let mut guard = default_store()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prev = guard.clone();
+    *guard = new;
+    prev
+}
 
 #[derive(Clone, Default)]
 struct CmdSpec {
@@ -137,6 +165,62 @@ fn best_effort_kill_pids(pids: &[i64]) {
     {
         let _ = pids;
     }
+}
+
+fn duration_to_millis(dur: Duration) -> u64 {
+    let ms_total: u128 = (dur.as_secs() as u128) * 1000 + ((dur.subsec_nanos() as u128 + 999_999) / 1_000_000);
+    ms_total.min(u64::MAX as u128) as u64
+}
+
+fn parse_timeout_value(v: Value, label: &str) -> LuaResult<Option<u64>> {
+    match v {
+        Value::Nil => Ok(None),
+        Value::Integer(i) => Ok(Some(i.max(0) as u64)),
+        Value::Number(n) => {
+            if !n.is_finite() {
+                return Err(mlua::Error::RuntimeError(format!("{label}: timeout must be finite")));
+            }
+            let n = n.max(0.0);
+            Ok(Some((n * 1000.0) as u64))
+        }
+        Value::String(s) => {
+            let raw = s.to_str()?.to_owned();
+            match parse_duration_str(raw.as_str()) {
+                Ok(d) => Ok(Some(duration_to_millis(d))),
+                Err(e) => Err(mlua::Error::RuntimeError(format!("{label}: invalid duration '{raw}': {e}"))),
+            }
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "{label}: timeout expects number or duration string, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn shell_defaults_table(lua: &Lua, defaults: ShellDefaults) -> LuaResult<Table> {
+    let t = lua.create_table()?;
+    t.set("pipefail", defaults.pipefail)?;
+    if let Some(ms) = defaults.timeout_ms {
+        t.set("timeout_ms", ms)?;
+    } else {
+        t.set("timeout_ms", mlua::Value::Nil)?;
+    }
+    Ok(t)
+}
+
+fn lua_shell_defaults(lua: &Lua, opts: Option<Table>) -> LuaResult<Table> {
+    if let Some(t) = opts {
+        let mut defaults = shell_defaults_snapshot();
+        if let Some(pf) = t.get::<Option<bool>>("pipefail")? {
+            defaults.pipefail = pf;
+        }
+        if let Some(v) = t.get::<Option<Value>>("timeout")? {
+            defaults.timeout_ms = parse_timeout_value(v, "shell_defaults:timeout")?;
+        }
+        set_shell_defaults(defaults.clone());
+        return shell_defaults_table(lua, defaults);
+    }
+    shell_defaults_table(lua, shell_defaults_snapshot())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,10 +536,12 @@ impl UserData for ProcStdin {
 
 impl Cmd {
     fn new(program: String, args: Vec<String>) -> Self {
+        let defaults = shell_defaults_snapshot();
         Self {
             spec: CmdSpec {
                 program,
                 args,
+                timeout_ms: defaults.timeout_ms,
                 ..Default::default()
             },
         }
@@ -491,10 +577,9 @@ impl UserData for Cmd {
             Ok(Self { spec })
         });
 
-        #[allow(clippy::cast_sign_loss)]
-        methods.add_method("timeout", |_, this, ms: i64| {
+        methods.add_method("timeout", |_, this, v: Value| {
             let mut spec = this.snapshot();
-            spec.timeout_ms = Some(ms.max(0) as u64);
+            spec.timeout_ms = parse_timeout_value(v, "cmd:timeout")?;
             Ok(Self { spec })
         });
 
@@ -537,7 +622,12 @@ impl UserData for Cmd {
             let spec = this.snapshot();
             async move {
                 let overlay = crate::lua::env::overlay_snapshot(&lua)?;
-                run_specs(vec![spec], false, RunMode::Inherit, overlay).await
+                let defaults = shell_defaults_snapshot();
+                let mode = match defaults.timeout_ms {
+                    Some(ms) => RunMode::InheritWithTimeout(Some(ms)),
+                    None => RunMode::Inherit,
+                };
+                run_specs(vec![spec], defaults.pipefail, mode, overlay).await
             }
         });
 
@@ -545,7 +635,12 @@ impl UserData for Cmd {
             let spec = this.snapshot();
             async move {
                 let overlay = crate::lua::env::overlay_snapshot(&lua)?;
-                run_specs(vec![spec], false, RunMode::Capture, overlay).await
+                let defaults = shell_defaults_snapshot();
+                let mode = match defaults.timeout_ms {
+                    Some(ms) => RunMode::CaptureWithTimeout(Some(ms)),
+                    None => RunMode::Capture,
+                };
+                run_specs(vec![spec], defaults.pipefail, mode, overlay).await
             }
         });
 
@@ -555,7 +650,8 @@ impl UserData for Cmd {
             async move {
                 let overlay = crate::lua::env::overlay_snapshot(&lua)?;
                 let cfg = SpawnCfg::from_lua(opts.as_ref(), &spec)?;
-                spawn_specs(vec![spec], false, None, cfg, overlay).await
+                let defaults = shell_defaults_snapshot();
+                spawn_specs(vec![spec], defaults.pipefail, defaults.timeout_ms, cfg, overlay).await
             }
         });
 
@@ -567,10 +663,11 @@ impl UserData for Cmd {
 
 impl Pipeline {
     fn new(specs: Vec<CmdSpec>, pipefail: bool) -> Self {
-        let timeout_ms = None;
+        let defaults = shell_defaults_snapshot();
+        let timeout_ms = defaults.timeout_ms;
         Self {
             specs,
-            pipefail,
+            pipefail: pipefail || defaults.pipefail,
             timeout_ms,
         }
     }
@@ -591,13 +688,12 @@ impl UserData for Pipeline {
             })
         });
 
-        #[allow(clippy::cast_sign_loss)]
-        methods.add_method("timeout", |_, this, ms: i64| {
+        methods.add_method("timeout", |_, this, v: Value| {
             let (specs, pipefail, _) = this.snapshot();
             Ok(Self {
                 specs,
                 pipefail,
-                timeout_ms: Some(ms.max(0) as u64),
+                timeout_ms: parse_timeout_value(v, "pipeline:timeout")?,
             })
         });
 
@@ -1659,6 +1755,7 @@ pub fn define(lua: &Lua) -> LuaResult<Table> {
     m.set("cmd", lua.create_function(lua_cmd)?)?;
     m.set("sh", lua.create_function(lua_sh)?)?;
     m.set("exit", lua.create_function(lua_exit)?)?;
+    m.set("shell_defaults", lua.create_function(lua_shell_defaults)?)?;
     Ok(m)
 }
 

@@ -3,7 +3,10 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     path::Path,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Ward-local environment overlay.
@@ -55,6 +58,13 @@ fn ensure_overlay(lua: &Lua) -> EnvOverlay {
         },
         |o| o.clone(),
     )
+}
+
+fn warn_export_once() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        rustlog::warn!("ward.env.export mutates the process environment; prefer ward.env.set for isolated changes");
+    }
 }
 
 /// Returns a snapshot of the current overlay.
@@ -154,6 +164,33 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
             move |_, ()| {
                 overlay.clear();
                 Ok(())
+            }
+        })?,
+    )?;
+
+    env_table.set(
+        "export",
+        lua.create_function({
+            let overlay = overlay.clone();
+            move |_, (key, value): (String, Option<String>)| {
+                if !is_valid_key(&key) {
+                    return Ok(false);
+                }
+                warn_export_once();
+                match value {
+                    Some(v) => {
+                        // SAFETY: std::env::set_var is marked unsafe on this target; the caller
+                        // explicitly requested process-wide mutation via `export`.
+                        unsafe { std::env::set_var(&key, &v) };
+                        overlay.set(key, v);
+                    }
+                    None => {
+                        // SAFETY: same rationale as set_var above; removing mirrors shell `unset`.
+                        unsafe { std::env::remove_var(&key) };
+                        overlay.unset(key);
+                    }
+                }
+                Ok(true)
             }
         })?,
     )?;

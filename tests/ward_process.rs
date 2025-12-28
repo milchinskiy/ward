@@ -85,3 +85,55 @@ print(json.encode({
     assert_eq!(value["steps"][0], Value::from(1));
     assert_eq!(value["steps"][1], Value::from(0));
 }
+
+#[test]
+fn shell_defaults_and_human_timeouts_apply_to_cmds_and_pipelines() {
+    let value = run_lua_script(
+        "process_shell_defaults.lua",
+        r#"local process = require("ward.process")
+local json = require("ward.convert.json")
+
+-- Apply only a default timeout using human-readable syntax (pipefail off).
+process.shell_defaults({ pipefail = false, timeout = "100ms" })
+
+-- Default timeout should trip on a slow command.
+local slow = process.cmd("sh", {"-c", "sleep 1"}):output()
+
+-- Enable default pipefail for pipelines.
+process.shell_defaults({ pipefail = true, timeout = nil })
+
+-- Default pipefail should mark the pipeline as not ok even though the last stage succeeds.
+local pipeline = (process.cmd("sh", {"-c", "exit 1"}) | process.cmd("true")):output()
+
+-- Turn pipefail back off and apply an explicit string timeout to a single command.
+process.shell_defaults({ pipefail = false, timeout = nil })
+-- Explicit string timeout should override defaults for a single command.
+local short = process.cmd("sh", {"-c", "sleep 0.2"}):timeout("20ms"):output()
+
+print(json.encode({
+  slow_ok = slow.ok,
+  slow_code = slow.code,
+  slow_steps = slow.steps,
+  pipefail_ok = pipeline.ok,
+  pipefail_code = pipeline.code,
+  pipefail_steps = pipeline.steps,
+  short_ok = short.ok,
+  short_code = short.code,
+  short_steps = short.steps,
+}))
+"#,
+    );
+
+    assert_eq!(value["slow_ok"], Value::Bool(false));
+    assert_eq!(value["slow_code"], Value::from(124));
+    assert!(value["slow_steps"].as_array().map_or(true, |v| v.is_empty()));
+
+    assert_eq!(value["pipefail_ok"], Value::Bool(false));
+    assert_eq!(value["pipefail_code"], Value::from(0));
+    assert_eq!(value["pipefail_steps"][0], Value::from(1));
+    assert_eq!(value["pipefail_steps"][1], Value::from(0));
+
+    assert_eq!(value["short_ok"], Value::Bool(false));
+    assert_eq!(value["short_code"], Value::from(124));
+    assert!(value["short_steps"].as_array().map_or(true, |v| v.is_empty()));
+}

@@ -105,3 +105,34 @@ print(json.encode({{
     assert_eq!(value["in_path"], Value::Bool(true));
     assert_eq!(value["cleared_has_key"], Value::Bool(false));
 }
+
+#[test]
+fn env_export_mutates_process_environment_with_warning_once() {
+    let script = r#"local env = require("ward.env")
+local json = require("ward.convert.json")
+
+-- Export updates the process environment and overlay.
+env.export("WARD_EXPORT_TEST_KEY", "persisted")
+local after_export = env.get("WARD_EXPORT_TEST_KEY", "missing")
+
+-- Clearing overlay should still see the exported value because it lives in the process env.
+env.clear()
+local after_clear = env.get("WARD_EXPORT_TEST_KEY", "missing")
+
+-- Removing via export(nil) should drop from both overlay and process.
+env.export("WARD_EXPORT_TEST_KEY", nil)
+local after_unset = env.get("WARD_EXPORT_TEST_KEY", "missing")
+
+print(json.encode({
+  after_export = after_export,
+  after_clear = after_clear,
+  after_unset = after_unset,
+}))
+"#;
+
+    let value = run_lua_script(script);
+
+    assert_eq!(value["after_export"], Value::from("persisted"));
+    assert_eq!(value["after_clear"], Value::from("persisted"));
+    assert_eq!(value["after_unset"], Value::from("missing"));
+}

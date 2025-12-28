@@ -1,4 +1,5 @@
 use rust_args_parser as ap;
+use serde_ext_duration::parse_str as parse_duration_str;
 use tokio::task::LocalSet;
 
 #[derive(Default, Debug)]
@@ -9,6 +10,25 @@ pub struct RunContext {
     instruction_limit: Option<u64>,
     thread_pool_size: Option<usize>,
     timeout: Option<std::time::Duration>,
+}
+
+fn parse_timeout_arg(value: &std::ffi::OsStr) -> Result<std::time::Duration, ap::Error> {
+    let lossy = value.to_string_lossy();
+    if let Ok(dur) = parse_duration_str(&lossy) {
+        return Ok(dur);
+    }
+    let timeout: f64 = lossy.parse().map_err(ap::Error::user)?;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
+    let timeout: u64 = if timeout > u64::MAX as f64 {
+        u64::MAX
+    } else {
+        (timeout * 1000.0) as u64
+    };
+    Ok(std::time::Duration::from_millis(timeout))
 }
 
 pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
@@ -70,23 +90,13 @@ pub fn command<'a>() -> ap::CmdSpec<'a, super::Context> {
         )
         .opt(
             ap::OptSpec::value("timeout", |value, ctx: &mut super::Context| {
-                let timeout: f64 = value.to_string_lossy().parse().map_err(ap::Error::user)?;
-                #[allow(
-                    clippy::cast_precision_loss,
-                    clippy::cast_sign_loss,
-                    clippy::cast_possible_truncation
-                )]
-                let timeout: u64 = if timeout > u64::MAX as f64 {
-                    u64::MAX
-                } else {
-                    (timeout * 1000.0) as u64
-                };
-                ctx.run.timeout = Some(std::time::Duration::from_millis(timeout));
+                let dur = parse_timeout_arg(value)?;
+                ctx.run.timeout = Some(dur);
                 Ok(())
             })
             .long("timeout")
             .short('T')
-            .help("Timeout in seconds")
+            .help("Timeout (accepts seconds or duration strings like 500ms, 2s, 1m)")
             .single(),
         )
         .handler(|_, ctx: &mut super::Context| {

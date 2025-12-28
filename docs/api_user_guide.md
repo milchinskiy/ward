@@ -79,7 +79,7 @@ end
 
 - `--memory-limit BYTES` — maximum Lua memory usage
 - `--instruction-limit N` — approximate instruction budget (see notes below)
-- `--timeout SECONDS` — wall-clock timeout
+- `--timeout SECONDS` — wall-clock timeout (also accepts duration strings like `500ms`, `2s`, `1m`)
 - `--threads N` — Tokio worker threads
 
 Notes:
@@ -121,7 +121,19 @@ Set an environment variable in the Ward overlay. Returns `false` if the key is i
 env.set("FOO", "bar")
 ```
 
-### 3.3 `env.unset(key) -> boolean`
+### 3.3 `env.export(key, value?) -> boolean`
+
+Mutate the *process* environment (not just Ward's overlay). This mirrors `export` in shells and affects concurrently running scripts in the same process, so use it sparingly.
+
+- `value` omitted / `nil` ⇒ removes the variable from the process environment and overlay.
+- Returns `false` on invalid keys.
+
+```lua
+-- Prefer env.set for isolation; use export only when you must change the process env.
+env.export("PATH", "/custom/bin:" .. (env.get("PATH") or ""))
+```
+
+### 3.4 `env.unset(key) -> boolean`
 
 Remove an environment variable (from the overlay). Returns `false` if the key is invalid.
 
@@ -129,11 +141,11 @@ Remove an environment variable (from the overlay). Returns `false` if the key is
 env.unset("FOO")
 ```
 
-### 3.4 `env.clear() -> nil`
+### 3.5 `env.clear() -> nil`
 
 Clears all overlay modifications (restores the effective environment back to the base process environment).
 
-### 3.5 `env.list() -> table`
+### 3.6 `env.list() -> table`
 
 Returns a table of the effective environment (base process env with overlay applied).
 
@@ -146,7 +158,7 @@ for k, v in pairs(t) do
 end
 ```
 
-### 3.6 `env.is_exists(key) -> boolean`
+### 3.7 `env.is_exists(key) -> boolean`
 
 Returns `true` if variable exists in the effective environment.
 
@@ -156,11 +168,11 @@ if env.is_exists("CI") then
 end
 ```
 
-### 3.7 `env.hostname() -> string`
+### 3.8 `env.hostname() -> string`
 
 Returns hostname.
 
-### 3.8 `env.which(name) -> string|nil`
+### 3.9 `env.which(name) -> string|nil`
 
 Searches `PATH` (and Windows `PATHEXT`) for an executable.
 
@@ -169,7 +181,7 @@ local git = env.which("git")
 assert(git, "git not found")
 ```
 
-### 3.9 `env.is_in_path(path_or_name) -> boolean`
+### 3.10 `env.is_in_path(path_or_name) -> boolean`
 
 Returns whether a candidate is reachable via `PATH` search.
 
@@ -530,6 +542,22 @@ Request script termination with an exit status.
 Use this for early returns from scripts that still need cleanup handlers to run.
 
 
+#### `process.shell_defaults(opts?) -> table`
+
+Set or read defaults that mimic common `set -euo pipefail` toggles:
+
+- `pipefail` (boolean) — when true, new commands/pipelines treat any non-zero step as failure by default.
+- `timeout` (number|string|nil) — pipeline-level timeout for new commands/pipelines. Accepts integers (ms) or human strings (`500ms`, `2s`, `1m`). `nil` clears the default.
+
+Returns a table with the active defaults. Example:
+
+```lua
+local process = require("ward.process")
+
+-- Enable pipefail + a 30s default timeout for all new cmds/pipelines.
+process.shell_defaults({ pipefail = true, timeout = "30s" })
+```
+
 ### 6.2 `CmdResult` userdata (result of run/output)
 
 Fields:
@@ -564,7 +592,7 @@ Builder methods (fluent):
 - `cmd:cwd(path) -> Cmd`
 - `cmd:env(key, value) -> Cmd`
 - `cmd:envs(tbl) -> Cmd` (reads key/value pairs)
-- `cmd:timeout(ms) -> Cmd`
+- `cmd:timeout(ms|duration_string|nil) -> Cmd`
 - `cmd:stdin(data) -> Cmd` (bytes string)
 - `cmd:stdin_file(path) -> Cmd`
 - `cmd:stdin_null() -> Cmd`
@@ -577,6 +605,8 @@ Notes:
 - `cmd:stdin(v)` accepts only a bytes string, or `nil`/`false` to reset to inherited stdin. Other values raise an error.
 - `cmd:stdin_file(path)` fails at spawn-time if the file cannot be opened.
 - `cmd:stderr_to_stdout(true)` merges stderr into stdout **best-effort**. Ordering may differ from shell `2>&1`. In capture mode (`output()`), merged data is returned in `stdout` and `stderr` is `nil`.
+
+- `cmd:timeout(...)` accepts milliseconds (number) or human strings like `"500ms"`, `"2s"`, `"1m"`. Pass `nil` to clear.
 
 - `cmd:stdin_null()` sets stdin to a closed stream (equivalent to shell `< /dev/null`).
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
@@ -771,8 +801,10 @@ child:wait()
 Builder methods:
 
 - `pl:pipefail(true|false) -> Pipeline` — if true, pipeline ok requires all steps succeed
-- `pl:timeout(ms) -> Pipeline`
+- `pl:timeout(ms|duration_string|nil) -> Pipeline`
 - `pl:pipe(cmd_or_pipeline) -> Pipeline`
+
+Timeouts accept milliseconds (number) or human strings (`"500ms"`, `"2s"`, `"1m"`). Pass `nil` to clear.
 
 Terminal operations:
 
