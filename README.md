@@ -1,17 +1,5 @@
 # Ward
 
-## Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/master/install.sh | bash
-```
-
-or
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/main/install.sh | WARD_FLAVOR=musl WARD_VERSION=v0.1.0 INSTALL_DIR=~/.local/bin bash
-```
-
 ## About
 
 Ward is a small, opinionated system-scripting runtime: **write scripts in Lua**,
@@ -35,10 +23,9 @@ sandboxing knobs
 
 ## What Ward is
 
-- **CLI runtime** that runs a Lua file (Lua 5.4, embedded via `mlua`)
+- **CLI runtime** that runs a Lua file (Lua 5.4)
 - **Built-in modules** exposed as `require("ward")` and `require("ward.<module>")`
-- **Async-first execution model** (Tokio runtime underneath), so IO-bound
-operations can be expressed cleanly
+- **Async-first execution model** so IO-bound operations can be expressed cleanly
 
 ## What Ward is not (current goals)
 
@@ -53,6 +40,8 @@ Inventory/targeting, orchestration status renderers, and similar "automation
 platform" features may exist later as separate modules or as part of `ward-lib`,
 but they are not the current focus.
 
+Detailed user guides are available [here](docs/api_user_guide.md).
+
 ## Status
 
 This project is early-stage. The current repository already includes
@@ -60,6 +49,20 @@ This project is early-stage. The current repository already includes
 changes while APIs settle.
 
 ## Quick start
+
+### Binary (github releases)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/master/install.sh | bash
+```
+
+or
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/master/install.sh \
+    | WARD_FLAVOR=musl WARD_VERSION=v0.1.0 INSTALL_DIR=~/.local/bin \
+    bash
+```
 
 ### Build
 
@@ -119,7 +122,7 @@ Options:
 
 - `-m, --memory-limit <bytes>`: memory cap for the Lua VM (bytes)
 - `-i, --instruction-limit <n>`: approximate instruction cap (enforced via VM hook)
-- `-t, --threads <n>`: Tokio worker thread count
+- `-t, --threads <n>`: worker thread count
 - `-T, --timeout <duration>`: timeout (`500ms`, `2s`, `1m`, or plain seconds)
 
 Logging:

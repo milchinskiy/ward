@@ -1,6 +1,7 @@
 # Ward API user guide
 
-This document is a user-facing reference for the Ward Lua runtime: modules, functions, userdata types, and common patterns.
+This document is a user-facing reference for the Ward Lua runtime: modules,
+functions, userdata types, and common patterns.
 
 ---
 
@@ -32,7 +33,8 @@ local term   = require("ward.term")
 
 Ward exposes async behavior in two ways:
 
-1) **Async functions** (implemented with `create_async_function`): you call them normally and get the value back.
+1) **Async functions** (implemented with `create_async_function`): you call
+them normally and get the value back.
 
 2) **Awaitable userdata**: you receive an object that must be explicitly awaited.
 
@@ -67,37 +69,48 @@ end
 
 - `nil|string` means the function returns either `nil` or a Lua string.
 - "bytes string" means a Lua string whose contents are raw bytes (binary-safe).
-- Paths are typically accepted as strings (and in most ward.fs APIs also as ward.fs.path objects).
+- Paths are typically accepted as strings (and in most ward.fs APIs also as
+ward.fs.path objects).
 - Most option tables are optional; when omitted, defaults apply.
 
 ---
 
 ### 2.1 CLI sandbox limits (`ward run`)
 
-`ward run` executes a Lua file under a configurable sandbox. The most commonly used switches are:
+`ward run` executes a Lua file under a configurable sandbox. The most commonly
+used switches are:
 
-- `--memory-limit BYTES` — maximum Lua memory usage
-- `--instruction-limit N` — approximate instruction budget (see notes below)
-- `--timeout SECONDS` — wall-clock timeout (also accepts duration strings like `500ms`, `2s`, `1m`)
-- `--threads N` — Tokio worker threads
+- `--memory-limit BYTES` - maximum Lua memory usage
+- `--instruction-limit N` - approximate instruction budget (see notes below)
+- `--timeout SECONDS` - wall-clock timeout (also accepts duration strings like
+`500ms`, `2s`, `1m`)
+- `--threads N` - Tokio worker threads
 
 Notes:
 
-- **Instruction limiting is intentionally coarse.** Ward installs a Lua VM hook every 1024 instructions (or less if the configured limit is smaller), so a script may exceed the configured limit by up to 1023 instructions.
-- The instruction hook does not execute while awaiting Rust async operations (e.g., I/O). Long-running I/O does not consume the instruction budget.
+- **Instruction limiting is intentionally coarse.** Ward installs a Lua VM
+hook every 1024 instructions (or less if the configured limit is smaller),
+so a script may exceed the configured limit by up to 1023 instructions.
+- The instruction hook does not execute while awaiting Rust async operations
+(e.g., I/O). Long-running I/O does not consume the instruction budget.
 
-## 3. `ward.env` — environment and PATH tools
+## 3. `ward.env` - environment and PATH tools
 
 Ward uses an environment overlay:
 
-- `env.set` / `env.unset` / `env.clear` modify Ward's overlay only (they do not mutate the process-global OS environment).
-- Read operations (`env.get` / `env.list` / `env.is_exists` / `env.which` / `env.is_in_path`) resolve the effective environment: the process environment plus overlay modifications (overlay wins).
-- The overlay is applied to child processes spawned via `ward.process` and to the git invocations used by `ward.net.fetch.git`.
-For child processes, precedence is: process env → Ward overlay → per-command overrides (Cmd:env / Cmd:envs).
+- `env.set` / `env.unset` / `env.clear` modify Ward's overlay only (they do
+not mutate the process-global OS environment).
+- Read operations (`env.get` / `env.list` / `env.is_exists` / `env.which` /
+`env.is_in_path`) resolve the effective environment: the process environment
+plus overlay modifications (overlay wins).
+- The overlay is applied to child processes spawned via `ward.process` and to
+the git invocations used by `ward.net.fetch.git`.
+For child processes, precedence is: process env → Ward overlay → per-command
+overrides (Cmd:env / Cmd:envs).
 
 Used to inspect and modify environment/Ward variables.
-Mutations are applied to the current process via local Ward env variables overlay to
-keep it safe in async contexts.
+Mutations are applied to the current process via local Ward env variables
+overlay to keep it safe in async contexts.
 
 ```lua
 local env = require("ward.env")
@@ -114,7 +127,8 @@ local port = env.get("PORT", "8080")
 
 ### 3.2 `env.set(key, value) -> boolean`
 
-Set an environment variable in the Ward overlay. Returns `false` if the key is invalid (empty, contains `=`, or contains `\0`) or the value contains `\0`.
+Set an environment variable in the Ward overlay. Returns `false` if the key
+is invalid (empty, contains `=`, or contains `\0`) or the value contains `\0`.
 
 ```lua
 env.set("FOO", "bar")
@@ -122,19 +136,24 @@ env.set("FOO", "bar")
 
 ### 3.3 `env.export(key, value?) -> boolean`
 
-Mutate the *process* environment (not just Ward's overlay). This mirrors `export` in shells and affects concurrently running scripts in the same process, so use it sparingly.
+Mutate the *process* environment (not just Ward's overlay). This mirrors
+`export` in shells and affects concurrently running scripts in the same
+process, so use it sparingly.
 
-- `value` omitted / `nil` ⇒ removes the variable from the process environment and overlay.
+- `value` omitted / `nil` ⇒ removes the variable from the process environment
+and overlay.
 - Returns `false` on invalid keys.
 
 ```lua
--- Prefer env.set for isolation; use export only when you must change the process env.
+-- Prefer env.set for isolation; use export only when you must change 
+-- the process env.
 env.export("PATH", "/custom/bin:" .. (env.get("PATH") or ""))
 ```
 
 ### 3.4 `env.unset(key) -> boolean`
 
-Remove an environment variable (from the overlay). Returns `false` if the key is invalid.
+Remove an environment variable (from the overlay). Returns `false` if the key
+is invalid.
 
 ```lua
 env.unset("FOO")
@@ -142,7 +161,8 @@ env.unset("FOO")
 
 ### 3.5 `env.clear() -> nil`
 
-Clears all overlay modifications (restores the effective environment back to the base process environment).
+Clears all overlay modifications (restores the effective environment back to
+the base process environment).
 
 ### 3.6 `env.list() -> table`
 
@@ -186,7 +206,7 @@ Returns whether a candidate is reachable via `PATH` search.
 
 ---
 
-## 4. `ward.fs` — filesystem, paths, globbing, temporary dirs
+## 4. `ward.fs` - filesystem, paths, globbing, temporary dirs
 
 ```lua
 local fs = require("ward.fs")
@@ -209,9 +229,12 @@ local fs = require("ward.fs")
 
 Notes:
 
-- For files, `fs.is_readable/fs.is_writable` check whether the file can be opened for read/write.
-- For directories, `fs.is_readable` checks whether the directory can be listed (`read_dir`), and
-  `fs.is_writable` checks whether a temporary file can be created and removed inside the directory.
+- For files, `fs.is_readable/fs.is_writable` check whether the file can be
+opened for read/write.
+- For directories, `fs.is_readable` checks whether the directory can be
+listed (`read_dir`), and
+  `fs.is_writable` checks whether a temporary file can be created and removed
+inside the directory.
 
 Example:
 
@@ -237,9 +260,10 @@ print(fs.dirname(p))
 print(fs.basename(p))
 ```
 
-#### 4.2.1 `fs.path` — pure path manipulation (Path userdata)
+#### 4.2.1 `fs.path` - pure path manipulation (Path userdata)
 
-`fs.path` provides a `Path` userdata type for manipulating paths **without** touching the filesystem.
+`fs.path` provides a `Path` userdata type for manipulating paths **without**
+touching the filesystem.
 It is useful for building paths safely and passing them to `ward.fs` APIs.
 
 Constructors:
@@ -286,14 +310,15 @@ Returns an array-like table of paths.
 Options (`opts` table):
 
 - `recursive` (boolean, default `false`)
-- `depth` (integer, default `0`) — recursion depth limit; `0` means unlimited
-- `dirs` (boolean, default `false`) — include directories
-- `files` (boolean, default `false`) — include files
-- `regex` (string|nil) — regex filter applied to the full path string
+- `depth` (integer, default `0`) - recursion depth limit; `0` means unlimited
+- `dirs` (boolean, default `false`) - include directories
+- `files` (boolean, default `false`) - include files
+- `regex` (string|nil) - regex filter applied to the full path string
 
 Notes:
 
-- If both `dirs` and `files` are `false` (the default), both directories and files are included.
+- If both `dirs` and `files` are `false` (the default), both directories and
+files are included.
 - Ordering is OS-dependent (Ward does not currently sort results).
 
 Examples:
@@ -333,7 +358,7 @@ Options:
 
 - `recursive` (boolean, default `false`)
 - `mode` (number, unix-only; default `0o755`)
-- `force` (boolean, default `false`) — treat “already exists” as success
+- `force` (boolean, default `false`) - treat "already exists" as success
 
 ```lua
 assert(fs.mkdir("build", { recursive = true, mode = 0o755 }).ok)
@@ -345,8 +370,8 @@ Remove file or directory.
 
 Options:
 
-- `recursive` (boolean, default `false`) — required for directories
-- `force` (boolean, default `false`) — treat missing-path as success
+- `recursive` (boolean, default `false`) - required for directories
+- `force` (boolean, default `false`) - treat missing-path as success
 
 ```lua
 assert(fs.rm("build", { recursive = true, force = true }).ok)
@@ -372,7 +397,7 @@ Create file if missing and update timestamps.
 
 Options:
 
-- `recursive` (boolean, default `false`) — create parent directories first
+- `recursive` (boolean, default `false`) - create parent directories first
 
 ```lua
 assert(fs.touch("logs/app.log", { recursive = true }).ok)
@@ -390,7 +415,8 @@ Options:
 
 Notes:
 
-- In `"text"` mode Ward validates UTF-8; the returned Lua string still contains the original bytes.
+- In `"text"` mode Ward validates UTF-8; the returned Lua string still
+contains the original bytes.
 
 ```lua
 local data = fs.read("README.md")
@@ -403,11 +429,12 @@ Write data to a file.
 Options (selected):
 
 - `mode` (`"overwrite"|"append"|"prepend"|"binary"`, default `"overwrite"`)
-- `binary` (boolean, default `false`) — convert `data` as bytes
+- `binary` (boolean, default `false`) - convert `data` as bytes
 
 Notes:
 
-- Ward does not automatically create parent directories; combine with `fs.mkdir(fs.dirname(path), {recursive=true})`.
+- Ward does not automatically create parent directories; combine with
+`fs.mkdir(fs.dirname(path), {recursive=true})`.
 
 ```lua
 assert(fs.write("out.txt", "hello\n").ok)
@@ -422,7 +449,9 @@ assert(fs.write("out.txt", "more\n", { mode = "append" }).ok)
 Notes:
 
 - `fs.copy` operates on regular files; it does not copy directories.
-- `fs.move` uses `rename` when possible. On cross-device moves it falls back to copy+remove for regular files; moving directories or symlinks across devices is currently unsupported.
+- `fs.move` uses `rename` when possible. On cross-device moves it falls back
+to copy+remove for regular files; moving directories or symlinks across
+devices is currently unsupported.
 
 ### 4.9 Temporary directories
 
@@ -437,13 +466,14 @@ print("tmp:", dir)
 
 ---
 
-## 5. `ward.io` — stdin/stdout/stderr (async)
+## 5. `ward.io` - stdin/stdout/stderr (async)
 
 ```lua
 local io = require("ward.io")
 ```
 
-Ward serializes reads/writes with internal mutexes so concurrent operations do not interleave unpredictably.
+Ward serializes reads/writes with internal mutexes so concurrent operations
+do not interleave unpredictably.
 
 ### 5.1 `io.read_all(opts?) -> bytes string`
 
@@ -451,7 +481,7 @@ Reads all remaining stdin into a string.
 
 Optional `opts`:
 
-- `max_bytes` (number|integer) — if provided, fails when stdin exceeds this limit.
+- `max_bytes` (number|integer) - if provided, fails when stdin exceeds this limit.
 
 ```lua
 local s = io.read_all()
@@ -474,7 +504,8 @@ print("got:", line)
 
 ### 5.3 `io.read_lines() -> function`
 
-Returns an iterator-like function. Each call reads one line from stdin and returns `bytes string|nil` (nil on EOF).
+Returns an iterator-like function. Each call reads one line from stdin and
+returns `bytes string|nil` (nil on EOF).
 
 ```lua
 local next_line = io.read_lines()
@@ -500,7 +531,7 @@ io.flush_stdout()
 
 ---
 
-## 6. `ward.process` — run external programs and pipelines
+## 6. `ward.process` - run external programs and pipelines
 
 ```lua
 local process = require("ward.process")
@@ -535,8 +566,10 @@ local cmd = process.sh("echo $HOME")
 Request script termination with an exit status.
 
 - This does **not** terminate the host process immediately.
-- Ward requests shutdown, unwinds execution, runs shutdown handlers, and then the CLI exits with the given status.
-- `code` defaults to `0`. Negative values are coerced to `1`. Values above `i32::MAX` are clamped.
+- Ward requests shutdown, unwinds execution, runs shutdown handlers, and
+then the CLI exits with the given status.
+- `code` defaults to `0`. Negative values are coerced to `1`. Values above
+`i32::MAX` are clamped.
 
 Use this for early returns from scripts that still need cleanup handlers to run.
 
@@ -544,8 +577,11 @@ Use this for early returns from scripts that still need cleanup handlers to run.
 
 Set or read defaults that mimic common `set -euo pipefail` toggles:
 
-- `pipefail` (boolean) — when true, new commands/pipelines treat any non-zero step as failure by default.
-- `timeout` (number|string|nil) — pipeline-level timeout for new commands/pipelines. Accepts integers (ms) or human strings (`500ms`, `2s`, `1m`). `nil` clears the default.
+- `pipefail` (boolean) - when true, new commands/pipelines treat any non-zero
+step as failure by default.
+- `timeout` (number|string|nil) - pipeline-level timeout for new
+commands/pipelines. Accepts integers (ms) or human strings (`500ms`,
+`2s`, `1m`). `nil` clears the default.
 
 Returns a table with the active defaults. Example:
 
@@ -565,12 +601,12 @@ Fields:
 - `result.signal` (integer|nil)
 - `result.stdout` (bytes string|nil)
 - `result.stderr` (bytes string|nil)
-- `result.steps` (table of integers) — per-step exit codes
+- `result.steps` (table of integers) - per-step exit codes
 
 Methods:
 
 - `result:is_ok() -> boolean`
-- `result:assert_ok(msg?) -> ()` — throws a Lua error if not ok
+- `result:assert_ok(msg?) -> ()` - throws a Lua error if not ok
 
 Example:
 
@@ -583,7 +619,8 @@ r:assert_ok("echo failed")
 
 ### 6.3 `Cmd` userdata
 
-In addition to one-shot execution (`run` / `output`), `Cmd` supports spawning long-running processes and streaming their stdio.
+In addition to one-shot execution (`run` / `output`), `Cmd` supports spawning
+long-running processes and streaming their stdio.
 
 Builder methods (fluent):
 
@@ -599,20 +636,27 @@ Builder methods (fluent):
 
 Notes:
 
-- `cmd:stdin(data)`, `cmd:stdin_file(path)`, and `cmd:stdin_null()` configure stdin for `run()` / `output()` / `spawn()`. This is **one-shot** input: Ward will feed the configured input (or connect stdin to the file/null stream) and then close stdin.
-- `cmd:stdin(v)` accepts only a bytes string, or `nil`/`false` to reset to inherited stdin. Other values raise an error.
+- `cmd:stdin(data)`, `cmd:stdin_file(path)`, and `cmd:stdin_null()` configure
+stdin for `run()` / `output()` / `spawn()`. This is **one-shot** input: Ward
+will feed the configured input (or connect stdin to the file/null stream)
+and then close stdin.
+- `cmd:stdin(v)` accepts only a bytes string, or `nil`/`false` to reset to
+inherited stdin. Other values raise an error.
 - `cmd:stdin_file(path)` fails at spawn-time if the file cannot be opened.
-- `cmd:stderr_to_stdout(true)` merges stderr into stdout **best-effort**. Ordering may differ from shell `2>&1`. In capture mode (`output()`), merged data is returned in `stdout` and `stderr` is `nil`.
+- `cmd:stderr_to_stdout(true)` merges stderr into stdout **best-effort**.
+Ordering may differ from shell `2>&1`. In capture mode (`output()`), merged
+data is returned in `stdout` and `stderr` is `nil`.
 
-- `cmd:timeout(...)` accepts whole seconds (number) or human strings like `"500ms"`, `"2s"`, `"1m"`. Pass `nil` to clear.
+- `cmd:timeout(...)` accepts whole seconds (number) or human strings like
+`"500ms"`, `"2s"`, `"1m"`. Pass `nil` to clear.
 
 - `cmd:stdin_null()` sets stdin to a closed stream (equivalent to shell `< /dev/null`).
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
 
 Terminal operations:
 
-- `cmd:run() -> CmdResult` — inherits stdio
-- `cmd:output() -> CmdResult` — captures stdout/stderr
+- `cmd:run() -> CmdResult` - inherits stdio
+- `cmd:output() -> CmdResult` - captures stdout/stderr
 
 Pipeline operator:
 
@@ -628,7 +672,8 @@ print(r.stdout)
 
 #### 6.3.1 `Cmd:spawn(opts?) -> ProcChild`
 
-Spawns a long-running child process and returns a `ProcChild` handle. This is used for:
+Spawns a long-running child process and returns a `ProcChild` handle. This is
+used for:
 
 - Streaming stdout/stderr incrementally (lines or raw bytes)
 - Interactive processes (writing to stdin)
@@ -640,7 +685,10 @@ Spawns a long-running child process and returns a `ProcChild` handle. This is us
   - `true` / `"pipe"`: pipe stdin so Lua can write via `ProcChild:stdin()`
   - `false` / `"inherit"`: inherit parent stdin
   - `"null"`: connect stdin to a closed stream
-  - Default: inferred. If you set `cmd:stdin(data)`, Ward pipes stdin to feed the bytes; if you set `cmd:stdin_null()`, stdin is null; if you set `cmd:stdin_file(path)`, Ward pre-opens the file and uses it as stdin. Otherwise stdin defaults to inherited stdin unless you request piping.
+  - Default: inferred. If you set `cmd:stdin(data)`, Ward pipes stdin to feed
+  the bytes; if you set `cmd:stdin_null()`, stdin is null; if you set
+  `cmd:stdin_file(path)`, Ward pre-opens the file and uses it as stdin.
+  Otherwise stdin defaults to inherited stdin unless you request piping.
 
 - `stdout` (boolean or `"pipe"|"inherit"|"null"`, default `true`)
   - `true` / `"pipe"`: pipe stdout so you can stream it
@@ -651,19 +699,27 @@ Spawns a long-running child process and returns a `ProcChild` handle. This is us
   - `true` / `"pipe"`: pipe stderr so you can stream it
   - `false` / `"inherit"`: inherit parent stderr
   - `"null"`: discard stderr
-  - Default: `true` when `cmd:stderr_to_stdout(true)` is set, otherwise `false` (`"inherit"`).
+  - Default: `true` when `cmd:stderr_to_stdout(true)` is set, otherwise
+`false` (`"inherit"`).
 
 Important:
 
-- If you call `cmd:stderr_to_stdout(true)`, Ward merges stderr into the stdout stream (similar to `2>&1`). In this case, stderr is not available separately and must be read from stdout. Ordering is best-effort and may not exactly match OS-level `2>&1` interleaving.
-- Choose either one-shot stdin via `cmd:stdin(...)` / `cmd:stdin_file(...)` / `cmd:stdin_null()`, or interactive stdin via `spawn({ stdin = true })` + `ProcChild:stdin()`. Combining `cmd:stdin(...)` / `cmd:stdin_file(...)` with `spawn({ stdin = true })` is invalid and raises an error.
+- If you call `cmd:stderr_to_stdout(true)`, Ward merges stderr into the stdout
+stream (similar to `2>&1`). In this case, stderr is not available separately
+and must be read from stdout. Ordering is best-effort and may not exactly
+match OS-level `2>&1` interleaving.
+- Choose either one-shot stdin via `cmd:stdin(...)` / `cmd:stdin_file(...)` /
+`cmd:stdin_null()`, or interactive stdin via `spawn({ stdin = true })` +
+`ProcChild:stdin()`. Combining `cmd:stdin(...)` / `cmd:stdin_file(...)` with
+`spawn({ stdin = true })` is invalid and raises an error.
 
 Example (spawn + line streaming):
 
 ```lua
 local p = require("ward.process")
 
-local child = p.cmd("sh", "-lc", "printf 'a\\nb\\n' && sleep 1"):spawn({ stdout = true })
+local child = p.cmd("sh", "-lc", "printf 'a\\nb\\n' && sleep 1")
+    :spawn({ stdout = true })
 local out = assert(child:stdout_lines())
 
 while true do
@@ -682,34 +738,39 @@ Represents a spawned child process.
 Methods:
 
 - `child:pid() -> integer`
-- `child:pids() -> table` — array of PIDs for all stages (for pipelines)
+- `child:pids() -> table` - array of PIDs for all stages (for pipelines)
 - `child:stdin() -> ProcStdin | nil, err`
   - Returns `nil, "not_piped"` if stdin is not piped.
 - `child:stdout_lines() -> LineStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
   - Returns `nil, "mode_conflict"` if stdout was already opened as bytes.
-  - You may call this multiple times; each handle reads from the same underlying pipe.
+  - You may call this multiple times; each handle reads from the same
+  underlying pipe.
 - `child:stderr_lines() -> LineStream | nil, err`
   - Returns `nil, "not_piped"` if stderr is not piped.
   - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
   - Returns `nil, "mode_conflict"` if stderr was already opened as bytes.
-  - You may call this multiple times; each handle reads from the same underlying pipe.
+  - You may call this multiple times; each handle reads from the same
+  underlying pipe.
 - `child:stdout_bytes() -> ByteStream | nil, err`
   - Returns `nil, "not_piped"` if stdout is not piped.
   - Returns `nil, "mode_conflict"` if stdout was already opened as lines.
-  - You may call this multiple times; each handle reads from the same underlying pipe.
+  - You may call this multiple times; each handle reads from the same
+  underlying pipe.
 - `child:stderr_bytes() -> ByteStream | nil, err`
   - Returns `nil, "not_piped"` if stderr is not piped.
   - Returns `nil, "merged"` if stderr was merged into stdout via `cmd:stderr_to_stdout(true)`.
   - Returns `nil, "mode_conflict"` if stderr was already opened as lines.
-  - You may call this multiple times; each handle reads from the same underlying pipe.
+  - You may call this multiple times; each handle reads from the same
+  underlying pipe.
 - `child:kill() -> boolean` (async)
 - `child:wait() -> CmdResult` (async)
 
 `ProcChild:wait()` returns a `CmdResult` with:
 
 - `ok`, `code`, `signal`
-- `stdout`/`stderr` are typically `nil` because streaming consumption is incremental, not captured.
+- `stdout`/`stderr` are typically `nil` because streaming consumption is
+incremental, not captured.
 
 #### 6.3.3 `ProcStdin` userdata (interactive stdin)
 
@@ -718,7 +779,7 @@ Returned by `ProcChild:stdin()` when stdin is piped.
 Methods:
 
 - `stdin:write(bytes_string) -> true | nil, err` (async)
-- `stdin:writeln(string) -> true | nil, err` (async) — writes string + `\\n`
+- `stdin:writeln(string) -> true | nil, err` (async) - writes string + `\\n`
 - `stdin:flush() -> true | nil, err` (async)
 - `stdin:close() -> true` (async)
 - `stdin:is_closed() -> boolean` (sync)
@@ -749,20 +810,25 @@ child:wait()
 
 Returned by `ProcChild:stdout_lines()` or `ProcChild:stderr_lines()`.
 
-Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will **compete** for data (load-balancing). Avoid creating multiple readers unless that is intended.
+Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will
+**compete** for data (load-balancing). Avoid creating multiple readers unless
+that is intended.
 
 Methods:
 
 - `stream:wait() -> line | nil, err`
   - `err` is `"eof"` when the stream ends.
 
-This object follows Ward’s “awaitable” contract (`:wait()`), so it can be used with `async.select(...)`.
+This object follows Ward’s "awaitable" contract (`:wait()`), so it can be
+used with `async.select(...)`.
 
 #### 6.3.5 `ByteStream` userdata (raw byte streaming)
 
 Returned by `ProcChild:stdout_bytes()` or `ProcChild:stderr_bytes()`.
 
-Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will **compete** for data (load-balancing). Avoid creating multiple readers unless that is intended.
+Note: Multiple coroutines reading the same `LineStream`/`ByteStream` will
+**compete** for data (load-balancing). Avoid creating multiple readers unless
+that is intended.
 
 Methods:
 
@@ -776,7 +842,7 @@ Aliases:
 - `stream:read(n?)` is the same as `stream:wait(n?)`.
 - `stream(n?)` calls `stream:wait(n?)`.
 
-This object follows Ward’s “awaitable” contract, so it can be used with `async.select(...)`.
+This object follows Ward’s "awaitable" contract, so it can be used with `async.select(...)`.
 
 Example (bytes):
 
@@ -798,11 +864,13 @@ child:wait()
 
 Builder methods:
 
-- `pl:pipefail(true|false) -> Pipeline` — if true, pipeline ok requires all steps succeed
+- `pl:pipefail(true|false) -> Pipeline` - if true, pipeline ok requires all
+steps succeed
 - `pl:timeout(ms|duration_string|nil) -> Pipeline`
 - `pl:pipe(cmd_or_pipeline) -> Pipeline`
 
-Timeouts accept whole seconds (number) or human strings (`"500ms"`, `"2s"`, `"1m"`). Pass `nil` to clear.
+Timeouts accept whole seconds (number) or human strings (`"500ms"`, `"2s"`,
+`"1m"`). Pass `nil` to clear.
 
 Terminal operations:
 
@@ -810,7 +878,9 @@ Terminal operations:
 - `pl:output() -> CmdResult`
 - `pl:spawn(opts?) -> ProcChild`
 
-`pl:spawn(opts?)` starts the pipeline and returns a `ProcChild` for streaming. The returned child refers to the **last stage** in the pipeline; use `child:pids()` to get all stage PIDs.
+`pl:spawn(opts?)` starts the pipeline and returns a `ProcChild` for streaming.
+The returned child refers to the **last stage** in the pipeline; use
+`child:pids()` to get all stage PIDs.
 
 Operator:
 
@@ -825,7 +895,7 @@ r:assert_ok()
 print("lines:", r.stdout)
 ```
 
-## 6.5 `ward.async` — tasks and channels
+## 6.5 `ward.async` - tasks and channels
 
 ```lua
 local async = require("ward.async")
@@ -833,25 +903,32 @@ local async = require("ward.async")
 
 ### 6.5.1 Overview
 
-Ward scripts run in an async-capable Lua runtime. Most operations that involve I/O (process execution, HTTP, timers) are implemented using async Rust internally, but can typically be called from Lua in a straightforward way because Ward drives the runtime for you.
+Ward scripts run in an async-capable Lua runtime. Most operations that involve
+I/O (process execution, HTTP, timers) are implemented using async Rust
+internally, but can typically be called from Lua in a straightforward
+way because Ward drives the runtime for you.
 
 `ward.async` provides **user-level concurrency primitives**:
 
 - **Tasks**: run Lua functions concurrently via `async.spawn(...)`.
 - **Channels**: communicate between tasks with bounded queues via `async.channel(...)`.
-- **Await helpers**: a single awaitable contract (`:wait()` / `__call()`) used consistently by `async.await` and `async.select`.
+- **Await helpers**: a single awaitable contract (`:wait()` / `__call()`) used
+consistently by `async.await` and `async.select`.
 
-These primitives are intended for local concurrency (I/O overlap, worker pools, fan-out/fan-in), not for CPU-parallel Lua execution.
+These primitives are intended for local concurrency (I/O overlap, worker pools,
+fan-out/fan-in), not for CPU-parallel Lua execution.
 
 ### 6.5.2 Awaitables contract (important)
 
 Ward uses a single user-facing await protocol:
 
-- An **awaitable** is a userdata that implements `:wait()` (preferred) and may also implement `__call()` so it can be awaited via `a()`.
+- An **awaitable** is a userdata that implements `:wait()` (preferred) and may
+also implement `__call()` so it can be awaited via `a()`.
 - `async.await(awaitable)` and `async.select(list)` operate on this protocol.
 - `Task` and `Channel` are awaitables via `Task:wait()` and `Channel:wait()`.
 
-This contract exists to keep concurrency composable: you can pass awaitables into `async.select` without “eagerly awaiting” them first.
+This contract exists to keep concurrency composable: you can pass awaitables
+into `async.select` without "eagerly awaiting" them first.
 
 ### 6.5.3 Tasks
 
@@ -865,11 +942,14 @@ local t = async.spawn(function(x)
 end, 41)
 ```
 
-**Lifetime and cancellation semantics**
+#### Lifetime and cancellation semantics
 
-Tasks are **structured by default**: if the `Task` handle becomes unreachable and is garbage-collected (or dropped by losing scope), the underlying task may be aborted.
+Tasks are **structured by default**: if the `Task` handle becomes unreachable
+and is garbage-collected (or dropped by losing scope), the underlying task may
+be aborted.
 
-If you intentionally want a “fire-and-forget” task, call `t:detach()` to prevent abort-on-drop. Prefer structured tasks unless you have a clear reason to detach.
+If you intentionally want a "fire-and-forget" task, call `t:detach()` to prevent
+abort-on-drop. Prefer structured tasks unless you have a clear reason to detach.
 
 #### `Task:wait() -> ...`
 
@@ -885,7 +965,8 @@ This makes `Task` compatible with the awaitables contract and with `async.select
 Errors:
 
 - Raises `"task already joined"` if `wait()` is called more than once.
-- Raises `"cancelled"` if the underlying task was aborted (for example, because the handle was dropped without `detach()`).
+- Raises `"cancelled"` if the underlying task was aborted (for example, because
+the handle was dropped without `detach()`).
 
 #### `Task:cancel() -> boolean`
 
@@ -949,8 +1030,10 @@ This makes `Channel` compatible with the awaitables contract and with `async.sel
 
 Notes:
 
-- `Channel:wait()` returns `nil, "closed"` only after the sender is closed **and** the queue is drained.
-- If your channel can carry `nil`, always check `err` to distinguish a `nil` message from closure.
+- `Channel:wait()` returns `nil, "closed"` only after the sender is closed
+**and** the queue is drained.
+- If your channel can carry `nil`, always check `err` to distinguish a `nil`
+message from closure.
 
 #### `Channel:try_recv() -> value | nil, err`
 
@@ -960,30 +1043,39 @@ Sync. Attempts to receive without waiting.
 - Returns `nil, "empty"` if no value is available.
 - Returns `nil, "closed"` if the channel is disconnected.
 
-Note: if another task is currently blocked in `wait()`, `try_recv()` may return `nil, "busy"` (implementation detail). Treat both `"empty"` and `"busy"` as retryable states.
+Note: if another task is currently blocked in `wait()`, `try_recv()` may return
+`nil, "busy"` (implementation detail). Treat both `"empty"` and `"busy"` as
+retryable states.
 
 #### `Channel:close() -> true`
 
 Closes the **sender** side of the channel.
 
-Important: `close()` does **not** discard queued items. Receivers can continue calling `wait()` until the channel is fully drained and then observe `nil, "closed"`.
+Important: `close()` does **not** discard queued items. Receivers can continue
+calling `wait()` until the channel is fully drained and then observe `nil, "closed"`.
 
 ### 6.5.5 Selecting across awaitables
 
 #### `async.select(list) -> idx, ...`
 
 Races multiple awaitables concurrently and returns the first one that completes.
-`list` must be an array-like table of **userdata awaitables**. For convenience, Ward also accepts:
+`list` must be an array-like table of **userdata awaitables**. For convenience,
+Ward also accepts:
 
 - `Task` userdata (waited via `:wait()`)
 - `Channel` userdata (waited via `:wait()`)
 
 The return value is:
 
-- `idx` — the **1-based** index into `list` that completed first
+- `idx` - the **1-based** index into `list` that completed first
 - followed by that awaitable’s return values
 
-Note: `async.select` cancels the non-winning internal *waiters* (the race participants), but it does not automatically cancel arbitrary underlying work unless that work is itself cancellation-aware. For example, if you race a long-running task against a timeout, the task will continue running unless you explicitly cancel it (or allow it to be aborted via structured drop/GC behavior).
+Note: `async.select` cancels the non-winning internal *waiters*
+(the race participants), but it does not automatically cancel arbitrary
+underlying work unless that work is itself cancellation-aware. For
+example, if you race a long-running task against a timeout, the task
+will continue running unless you explicitly cancel it (or allow it to
+be aborted via structured drop/GC behavior).
 
 Example: race a task against a timeout
 
@@ -1002,9 +1094,11 @@ print("winner", idx, v)
 
 ### 6.5.6 `async.await(awaitable) -> ...`
 
-Awaits a single awaitable userdata using the awaitables contract (`:wait()` preferred, or `__call()`).
+Awaits a single awaitable userdata using the awaitables contract
+(`:wait()` preferred, or `__call()`).
 
-This is mostly a convenience wrapper for readability and for writing higher-level helpers.
+This is mostly a convenience wrapper for readability and for writing
+higher-level helpers.
 
 ```lua
 local async = require("ward.async")
@@ -1045,7 +1139,8 @@ See `samples/async.worker_pool.lua` for a complete runnable example.
 
 ### 6.6 Streaming example: watch a long-running command and react to new output
 
-This pattern is common in bash/sh scripting (e.g., `tail -f ... | while read ...; do ...; done`).
+This pattern is common in bash/sh scripting
+(e.g., `tail -f ... | while read ...; do ...; done`).
 In Ward, do it with `spawn()` and `stdout_lines()`:
 
 ```lua
@@ -1076,7 +1171,7 @@ child:wait()
 
 ---
 
-## 7. `ward.time` — wall clock, parsing, durations, timers
+## 7. `ward.time` - wall clock, parsing, durations, timers
 
 ```lua
 local time = require("ward.time")
@@ -1085,13 +1180,13 @@ local time = require("ward.time")
 ### 7.1 Wall clock
 
 - `time.now() -> TimePoint`
-- `time.now_table() -> table` — returns a table with timestamp components
+- `time.now_table() -> table` - returns a table with timestamp components
 
 ### 7.2 Parsing
 
 - `time.parse_rfc3339(s) -> TimePoint|nil`
 - `time.parse_rfc2822(s) -> TimePoint|nil`
-- `time.parse(s) -> TimePoint|nil` — best-effort parser
+- `time.parse(s) -> TimePoint|nil` - best-effort parser
 
 ### 7.3 Construction
 
@@ -1133,10 +1228,10 @@ Examples:
 
 ```lua
 -- sleep
-time.sleep("200ms")()
+time.sleep("200ms"):wait()
 
 -- after
-local v = time.after("1s", function() return "done" end)()
+local v = time.after("1s", function() return "done" end):wait()
 print(v)
 
 -- interval
@@ -1148,7 +1243,7 @@ end
 -- timeout
 local a = time.sleep("5s")
 local ok, err = pcall(function()
-  time.timeout(a, "200ms")()
+  time.timeout(a, "200ms"):wait()
 end)
 print(ok, err)
 ```
@@ -1159,7 +1254,7 @@ print(ok, err)
 
 ---
 
-## 8. `ward.term` — terminal utilities (prompting, ansi, progress)
+## 8. `ward.term` - terminal utilities (prompting, ansi, progress)
 
 ```lua
 local term = require("ward.term")
@@ -1182,16 +1277,17 @@ Awaitable methods:
 #### `term.prompt{ question, default?, trim? }`
 
 ```lua
-local name = term.prompt({ question = "Name", default = "guest" })()
+local name = term.prompt({ question = "Name", default = "guest" }):wait()
 print("hello", name)
 ```
 
 #### `term.confirm{ question, default? }`
 
-Accepted answers: `y/yes` and `n/no` (case-insensitive). Empty input returns the `default` if provided.
+Accepted answers: `y/yes` and `n/no` (case-insensitive). Empty input returns
+the `default` if provided.
 
 ```lua
-local ok = term.confirm({ question = "Continue?", default = false })()
+local ok = term.confirm({ question = "Continue?", default = false }):wait()
 if not ok then return end
 ```
 
@@ -1200,7 +1296,7 @@ if not ok then return end
 Reads a line with no echo (TTY).
 
 ```lua
-local secret = term.password({ prompt = "Password:" })()
+local secret = term.password({ prompt = "Password:" }):wait()
 ```
 
 #### `term.choose{ question, options, default? }`
@@ -1212,7 +1308,7 @@ local choice = term.choose({
   question = "Pick one",
   options = { "dev", "staging", "prod" },
   default = "dev",
-})()
+}):wait()
 print(choice)
 ```
 
@@ -1226,7 +1322,7 @@ print(choice)
 ### 8.3 Screen control and tty
 
 - `term.clear() -> true`
-- `term.isatty(stream?) -> boolean` — `stream` can be `"stdout"` or `"stderr"`
+- `term.isatty(stream?) -> boolean` - `stream` can be `"stdout"` or `"stderr"`
 
 ### 8.4 `term.ansi` submodule
 
@@ -1235,7 +1331,8 @@ print(choice)
 Common style fields:
 
 - `ansi.reset`
-- `ansi.bold`, `ansi.dim`, `ansi.italic`, `ansi.underline`, `ansi.blink`, `ansi.reverse`, `ansi.hidden`, `ansi.strike`
+- `ansi.bold`, `ansi.dim`, `ansi.italic`, `ansi.underline`, `ansi.blink`,
+`ansi.reverse`, `ansi.hidden`, `ansi.strike`
 
 Clear / cursor fields:
 
@@ -1243,13 +1340,19 @@ Clear / cursor fields:
 
 Colors (foreground):
 
-- `ansi.black`, `ansi.red`, `ansi.green`, `ansi.yellow`, `ansi.blue`, `ansi.magenta`, `ansi.cyan`, `ansi.white`, `ansi.default`
-- `ansi.bright_black`, `ansi.bright_red`, `ansi.bright_green`, `ansi.bright_yellow`, `ansi.bright_blue`, `ansi.bright_magenta`, `ansi.bright_cyan`, `ansi.bright_white`
+- `ansi.black`, `ansi.red`, `ansi.green`, `ansi.yellow`, `ansi.blue`,
+`ansi.magenta`, `ansi.cyan`, `ansi.white`, `ansi.default`
+- `ansi.bright_black`, `ansi.bright_red`, `ansi.bright_green`,
+`ansi.bright_yellow`, `ansi.bright_blue`, `ansi.bright_magenta`,
+`ansi.bright_cyan`, `ansi.bright_white`
 
 Colors (background):
 
-- `ansi.bg_black`, `ansi.bg_red`, `ansi.bg_green`, `ansi.bg_yellow`, `ansi.bg_blue`, `ansi.bg_magenta`, `ansi.bg_cyan`, `ansi.bg_white`, `ansi.bg_default`
-- `ansi.bg_bright_black`, `ansi.bg_bright_red`, `ansi.bg_bright_green`, `ansi.bg_bright_yellow`, `ansi.bg_bright_blue`, `ansi.bg_bright_magenta`, `ansi.bg_bright_cyan`, `ansi.bg_bright_white`
+- `ansi.bg_black`, `ansi.bg_red`, `ansi.bg_green`, `ansi.bg_yellow`,
+`ansi.bg_blue`, `ansi.bg_magenta`, `ansi.bg_cyan`, `ansi.bg_white`, `ansi.bg_default`
+- `ansi.bg_bright_black`, `ansi.bg_bright_red`, `ansi.bg_bright_green`,
+`ansi.bg_bright_yellow`, `ansi.bg_bright_blue`, `ansi.bg_bright_magenta`,
+`ansi.bg_bright_cyan`, `ansi.bg_bright_white`
 
 Example:
 
@@ -1270,18 +1373,21 @@ Constructor args (table):
 
 Progress methods (getter/setter style):
 
-- `p:tick(delta?) -> nil` — increment by `delta` (default 1)
-- `p:value(v?) -> integer|nil` — get current when called without args; set when `v` provided
-- `p:total(t?) -> integer|nil` — get total when called without args; set when `t` provided
-- `p:message(s?) -> string|nil` — get message when called without args; set when `s` provided
-- `p:finish(final_msg?) -> true` — render final line + newline (TTY only)
+- `p:tick(delta?) -> nil` - increment by `delta` (default 1)
+- `p:value(v?) -> integer|nil` - get current when called without args;
+set when `v` provided
+- `p:total(t?) -> integer|nil` - get total when called without args;
+set when `t` provided
+- `p:message(s?) -> string|nil` - get message when called without args;
+set when `s` provided
+- `p:finish(final_msg?) -> true` - render final line + newline (TTY only)
 
 Example:
 
 ```lua
 local p = term.progress({ total = 10, message = "Working" })
 for _ = 1, 10 do
-  time.sleep("150ms")()
+  time.sleep("150ms"):wait()
   p:tick(1)
 end
 p:finish("Done")
@@ -1289,7 +1395,7 @@ p:finish("Done")
 
 ---
 
-## 9. `ward.net` — HTTP requests and fetching
+## 9. `ward.net` - HTTP requests and fetching
 
 ```lua
 local net   = require("ward.net")
@@ -1299,14 +1405,15 @@ local fetch = require("ward.net.fetch")
 
 `ward.net` groups network-related helpers. Today it exposes two submodules:
 
-- `ward.net.http` — in-process HTTP requests via `reqwest`
-- `ward.net.fetch` — higher-level “fetch into a file/dir” helpers
+- `ward.net.http` - in-process HTTP requests via `reqwest`
+- `ward.net.fetch` - higher-level "fetch into a file/dir" helpers
 
-### 9.1 `ward.net.http` — HTTP request primitives
+### 9.1 `ward.net.http` - HTTP request primitives
 
 #### Functions
 
-All functions below are **async** (implemented with `create_async_function`). Call them normally and receive a `HttpResponse` userdata.
+All functions below are **async** (implemented with `create_async_function`).
+Call them normally and receive a `HttpResponse` userdata.
 
 - `http.get(url, opts?) -> HttpResponse`
 - `http.delete(url, opts?) -> HttpResponse`
@@ -1318,20 +1425,23 @@ All functions below are **async** (implemented with `create_async_function`). Ca
 
 `opts` is optional. When omitted or not a table, defaults are applied.
 
-- `query` (table) — query parameters.
+- `query` (table) - query parameters.
   - Keys are strings.
-  - Values must be `string`, `number`, `integer`, or `boolean` (they are converted to strings).
-- `headers` (table) — header map: `string -> string`.
-- `timeout` (number) — request timeout in **seconds** (float accepted). Must be positive and finite.
-- `follow_redirects` (boolean, default `true`) — when enabled, redirects are followed (limited to 10).
-- `allow_error` (boolean, default `false`) —
+  - Values must be `string`, `number`, `integer`, or `boolean` (they are
+  converted to strings).
+- `headers` (table) - header map: `string -> string`.
+- `timeout` (number) - request timeout in **seconds** (float accepted). Must be
+positive and finite.
+- `follow_redirects` (boolean, default `true`) - when enabled, redirects are
+followed (limited to 10).
+- `allow_error` (boolean, default `false`) -
   - `false`: non-2xx responses raise a runtime error.
   - `true`: non-2xx responses are returned as `HttpResponse`.
 
 Body options (used by `post` and `put`):
 
-- `json` (any) — serializable Lua value encoded as JSON.
-- `form` (table) — form fields `string -> string`.
+- `json` (any) - serializable Lua value encoded as JSON.
+- `form` (table) - form fields `string -> string`.
 
 If both `json` and `form` are present, JSON takes precedence.
 
@@ -1341,14 +1451,14 @@ Returned by `http.*` functions.
 
 Fields (also available via methods):
 
-- `resp.status` (integer) — HTTP status code.
-- `resp.headers` (table) — header map `string -> string`.
+- `resp.status` (integer) - HTTP status code.
+- `resp.headers` (table) - header map `string -> string`.
   - Note: duplicate header names will be overwritten in the table (last one wins).
-- `resp.body` (string|nil) — response body decoded as text.
+- `resp.body` (string|nil) - response body decoded as text.
 
 Methods:
 
-- `resp:is_ok() -> boolean` — true for 2xx.
+- `resp:is_ok() -> boolean` - true for 2xx.
 - `resp:status() -> integer`
 - `resp:headers() -> table`
 - `resp:body() -> string|nil`
@@ -1381,9 +1491,9 @@ local r3 = http.post("https://httpbin.org/post", {
 assert(r3:is_ok())
 ```
 
-### 9.2 `ward.net.fetch` — fetch into a file/dir
+### 9.2 `ward.net.fetch` - fetch into a file/dir
 
-`fetch` is for “download/checkout into a path” workflows that compose well with `ward.fs`.
+`fetch` is for "download/checkout into a path" workflows that compose well with `ward.fs`.
 
 #### `fetch.url(url, opts?) -> FetchResponse`
 
@@ -1391,22 +1501,26 @@ Downloads the response body as bytes into a file (streaming), then returns metad
 
 Options (`opts` table):
 
-- `method` (string, default `"GET"`) — one of: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`.
-- `headers` (table) — header map `string -> string`.
-- `timeout` (number) — request timeout in **seconds**.
-- `follow_redirects` (boolean, default `true`) — redirects are followed (limited to 10).
-- `into` (string|nil) — destination file path.
+- `method` (string, default `"GET"`) - one of: `GET`, `POST`, `PUT`, `PATCH`,
+`DELETE`, `HEAD`, `OPTIONS`.
+- `headers` (table) - header map `string -> string`.
+- `timeout` (number) - request timeout in **seconds**.
+- `follow_redirects` (boolean, default `true`) - redirects are followed
+(limited to 10).
+- `into` (string|nil) - destination file path.
   - If omitted, Ward creates a unique file path under the OS temp directory.
-- `max_bytes` (integer|number|nil) — maximum allowed response size.
+- `max_bytes` (integer|number|nil) - maximum allowed response size.
   - Values `<= 0` disable the limit.
-  - If the limit is exceeded, Ward removes the partial file and returns `ok=false` with `status=413` and `path=nil`.
+  - If the limit is exceeded, Ward removes the partial file and returns
+`ok=false` with `status=413` and `path=nil`.
 
 `FetchResponse` userdata fields/methods:
 
 - `resp.ok` / `resp:is_ok() -> boolean`
-- `resp.status` / `resp:status() -> integer` — HTTP status code (or `413` if `max_bytes` exceeded).
-- `resp.path` / `resp:path() -> string|nil` — destination path.
-- `resp.size` / `resp:size() -> integer` — bytes written.
+- `resp.status` / `resp:status() -> integer` - HTTP status code (or `413`
+if `max_bytes` exceeded).
+- `resp.path` / `resp:path() -> string|nil` - destination path.
+- `resp.size` / `resp:size() -> integer` - bytes written.
 
 Example:
 
@@ -1429,7 +1543,8 @@ assert(fs.is_file(r.path))
 
 #### `fetch.git(url, opts?) -> FetchResponse`
 
-Clones a Git repository into a directory (using the external `git` command), then optionally checks out a revision.
+Clones a Git repository into a directory (using the external `git` command),
+then optionally checks out a revision.
 
 Notes:
 
@@ -1438,20 +1553,23 @@ Notes:
 
 Options (`opts` table):
 
-- `into` (string|nil) — destination directory.
+- `into` (string|nil) - destination directory.
   - If omitted, Ward creates a unique directory under the OS temp directory.
-- `depth` (integer|nil) — shallow clone depth (must be > 0). Defaults to `1`.
-- `filter_blobs` (boolean, default `true`) — when true, uses `--filter=blob:none`.
-- `branch` (string|nil) — clone a specific branch.
-- `tag` (string|nil) — clone a specific tag (used as `--branch <tag>`).
+- `depth` (integer|nil) - shallow clone depth (must be > 0). Defaults to `1`.
+- `filter_blobs` (boolean, default `true`) - when true, uses `--filter=blob:none`.
+- `branch` (string|nil) - clone a specific branch.
+- `tag` (string|nil) - clone a specific tag (used as `--branch <tag>`).
   - If both `branch` and `tag` are set, `branch` takes precedence.
-- `recursive` (boolean, default `false`) — when true, uses `--recurse-submodules`.
-- `rev` (string|nil) — if set, runs `git checkout <rev>` after cloning.
-- `timeout` (number|nil) — command timeout in **seconds**.
-- `max_bytes` (integer|number|nil) — maximum allowed on-disk size for the cloned directory.
-  - If exceeded, Ward removes the directory and returns `ok=false` with `status=413` and `path=nil`.
+- `recursive` (boolean, default `false`) - when true, uses `--recurse-submodules`.
+- `rev` (string|nil) - if set, runs `git checkout <rev>` after cloning.
+- `timeout` (number|nil) - command timeout in **seconds**.
+- `max_bytes` (integer|number|nil) - maximum allowed on-disk size for the cloned
+directory.
+  - If exceeded, Ward removes the directory and returns `ok=false` with
+`status=413` and `path=nil`.
 
-On success, `FetchResponse.status` is `0` and `ok=true`. On failure, `status` is the `git` exit code.
+On success, `FetchResponse.status` is `0` and `ok=true`. On failure, `status` is
+the `git` exit code.
 
 Example:
 
@@ -1475,7 +1593,7 @@ print("checked out into", r.path, "bytes", r.size)
 
 ---
 
-## 10. `ward.convert` — serialization formats
+## 10. `ward.convert` - serialization formats
 
 ```lua
 local convert = require("ward.convert")
@@ -1500,7 +1618,7 @@ local t = json.decode(s)
 
 ---
 
-## 11. `ward.helpers` — small utility functions
+## 11. `ward.helpers` - small utility functions
 
 ```lua
 local helpers = require("ward.helpers")
@@ -1512,27 +1630,29 @@ local t = require("ward.helpers.table")
 
 ### 11.1 `helpers.number`
 
-Numeric predicates and aggregates. All functions return errors if arguments have the wrong type.
+Numeric predicates and aggregates. All functions return errors if arguments have
+the wrong type.
 
 Functions:
 
-- `is_integer(n) -> boolean` — `true` when `n` is finite and has no fractional component.
-- `is_float(n) -> boolean` — `true` for finite, non-integer numbers.
-- `is_number(v) -> boolean` — `true` for Lua integers or floats.
-- `is_nan(v) -> boolean` — `true` when `v` is a float NaN.
-- `is_infinity(v) -> boolean` — `true` when `v` is `+/-inf`.
-- `is_finite(v) -> boolean` — `true` for integers and finite floats.
-- `round(n, precision) -> number` — rounds `n` to `precision` decimal places.
-- `ceil(n) -> number` — ceiling.
-- `floor(n) -> number` — floor.
-- `abs(n) -> number` — absolute value.
-- `clamp(n, min, max) -> number` — clamps `n` into `[min, max]`.
-- `sign(n) -> integer` — returns `1`, `0`, or `-1`.
-- `random(min, max) -> number` — uniform random between `min` and `max` (inclusive for integers).
-- `avg(...) -> number` — average of variadic arguments (at least one required).
-- `min(...) -> number` — minimum of variadic arguments (at least one required).
-- `max(...) -> number` — maximum of variadic arguments (at least one required).
-- `sum(...) -> number` — sum of variadic arguments (at least one required).
+- `is_integer(n) -> boolean` - `true` when `n` is finite and has no fractional component.
+- `is_float(n) -> boolean` - `true` for finite, non-integer numbers.
+- `is_number(v) -> boolean` - `true` for Lua integers or floats.
+- `is_nan(v) -> boolean` - `true` when `v` is a float NaN.
+- `is_infinity(v) -> boolean` - `true` when `v` is `+/-inf`.
+- `is_finite(v) -> boolean` - `true` for integers and finite floats.
+- `round(n, precision) -> number` - rounds `n` to `precision` decimal places.
+- `ceil(n) -> number` - ceiling.
+- `floor(n) -> number` - floor.
+- `abs(n) -> number` - absolute value.
+- `clamp(n, min, max) -> number` - clamps `n` into `[min, max]`.
+- `sign(n) -> integer` - returns `1`, `0`, or `-1`.
+- `random(min, max) -> number` - uniform random between `min` and `max`
+(inclusive for integers).
+- `avg(...) -> number` - average of variadic arguments (at least one required).
+- `min(...) -> number` - minimum of variadic arguments (at least one required).
+- `max(...) -> number` - maximum of variadic arguments (at least one required).
+- `sum(...) -> number` - sum of variadic arguments (at least one required).
 
 ### 11.2 `helpers.string`
 
@@ -1540,76 +1660,87 @@ String utilities and regex helpers. Patterns use Rust regex syntax.
 
 Functions:
 
-- `trim(s) -> string` — trim both ends.
-- `ltrim(s) -> string` — trim start.
-- `rtrim(s) -> string` — trim end.
-- `contains(s, substr) -> boolean` — substring test.
-- `replace(s, substr, repl) -> string` — replace first occurrence.
-- `replace_all(s, substr, repl) -> string` — replace all occurrences.
-- `split(s, sep) -> table` — splits into an array table.
-- `join(sep, ...) -> string` — joins variadic strings with `sep`.
-- `to_lower(s) -> string` — lowercase.
-- `to_upper(s) -> string` — uppercase.
-- `to_title(s) -> string` — title-case words.
-- `to_snake(s) -> string` — snake_case.
-- `to_camel(s) -> string` — camelCase.
-- `to_kebab(s) -> string` — kebab-case.
-- `to_pascal(s) -> string` — PascalCase.
-- `to_slug(s) -> string` — slug (alias of kebab-case).
-- `match(s, pattern) -> table` — first regex match captures as array (empty table if none).
-- `match_all(s, pattern) -> table` — list of capture arrays for all matches.
-- `match_replace(s, pattern, repl) -> string` — replace first regex match.
-- `match_replace_all(s, pattern, repl) -> string` — replace all regex matches.
+- `trim(s) -> string` - trim both ends.
+- `ltrim(s) -> string` - trim start.
+- `rtrim(s) -> string` - trim end.
+- `contains(s, substr) -> boolean` - substring test.
+- `replace(s, substr, repl) -> string` - replace first occurrence.
+- `replace_all(s, substr, repl) -> string` - replace all occurrences.
+- `split(s, sep) -> table` - splits into an array table.
+- `join(sep, ...) -> string` - joins variadic strings with `sep`.
+- `to_lower(s) -> string` - lowercase.
+- `to_upper(s) -> string` - uppercase.
+- `to_title(s) -> string` - title-case words.
+- `to_snake(s) -> string` - snake_case.
+- `to_camel(s) -> string` - camelCase.
+- `to_kebab(s) -> string` - kebab-case.
+- `to_pascal(s) -> string` - PascalCase.
+- `to_slug(s) -> string` - slug (alias of kebab-case).
+- `match(s, pattern) -> table` - first regex match captures as array (empty
+table if none).
+- `match_all(s, pattern) -> table` - list of capture arrays for all matches.
+- `match_replace(s, pattern, repl) -> string` - replace first regex match.
+- `match_replace_all(s, pattern, repl) -> string` - replace all regex matches.
 
 ### 11.3 `helpers.table`
 
-Functional-style table helpers. Unless noted, sequence order is preserved and non-sequence keys are ignored. Functions that expect an array treat numeric keys from `1..n` as the sequence.
+Functional-style table helpers. Unless noted, sequence order is preserved and
+non-sequence keys are ignored. Functions that expect an array treat numeric
+keys from `1..n` as the sequence.
 
 Functions:
 
-- `is_empty(tbl) -> boolean` — `true` when table has no key/value pairs.
-- `contains(tbl, value) -> boolean` — `true` if any value equals `value`.
-- `concat(tbl, ...) -> table` — concatenates array tables.
-- `merge(tbl, ...) -> table` — shallow merge (later values overwrite).
-- `deep_merge(tbl, ...) -> table` — recursive merge for nested tables.
-- `map(tbl, fn) -> table` — applies `fn(value, key)`; returns table with same keys.
-- `filter(tbl, fn) -> table` — keeps entries where `fn(value, key)` returns `true`.
-- `reduce(tbl, fn, acc) -> any` — folds with `fn(acc, value, key)`.
-- `each(tbl, fn) -> table` — calls `fn(value, key)` for side effects; returns original table.
-- `find(tbl, fn) -> any|nil` — first value where `fn(value, key)` returns `true`, else `nil`.
-- `findall(tbl, fn) -> table` — array of values where predicate is `true`.
-- `sort(tbl, fn) -> table` — returns sorted copy using comparator `fn(a, b) -> boolean` (`true` when `a < b`).
-- `reverse(tbl) -> table` — reversed array copy.
-- `shuffle(tbl) -> table` — shuffled array copy.
-- `flatten(tbl) -> table` — recursively flattens nested array tables.
-- `uniq(tbl) -> table` — removes duplicates (first occurrence wins).
-- `uniq_by(tbl, fn) -> table` — uniqueness by computed key `fn(value, key)`.
-- `count(tbl, fn) -> integer` — number of entries where predicate is `true`.
-- `keys(tbl) -> table` — array of keys.
-- `values(tbl) -> table` — array of values.
-- `push(tbl, value) -> nil` — append to end.
-- `append(tbl, value) -> nil` — alias of `push`.
-- `pop(tbl) -> any|nil` — remove and return last element (or `nil`).
-- `shift(tbl) -> any|nil` — remove and return first element (or `nil`).
-- `prepend(tbl, value) -> nil` — insert at start.
-- `join(tbl, sep) -> string` — stringifies sequence values with separator.
+- `is_empty(tbl) -> boolean` - `true` when table has no key/value pairs.
+- `contains(tbl, value) -> boolean` - `true` if any value equals `value`.
+- `concat(tbl, ...) -> table` - concatenates array tables.
+- `merge(tbl, ...) -> table` - shallow merge (later values overwrite).
+- `deep_merge(tbl, ...) -> table` - recursive merge for nested tables.
+- `map(tbl, fn) -> table` - applies `fn(value, key)`; returns table with same keys.
+- `filter(tbl, fn) -> table` - keeps entries where `fn(value, key)` returns `true`.
+- `reduce(tbl, fn, acc) -> any` - folds with `fn(acc, value, key)`.
+- `each(tbl, fn) -> table` - calls `fn(value, key)` for side effects; returns
+original table.
+- `find(tbl, fn) -> any|nil` - first value where `fn(value, key)` returns
+`true`, else `nil`.
+- `findall(tbl, fn) -> table` - array of values where predicate is `true`.
+- `sort(tbl, fn) -> table` - returns sorted copy using comparator
+`fn(a, b) -> boolean` (`true` when `a < b`).
+- `reverse(tbl) -> table` - reversed array copy.
+- `shuffle(tbl) -> table` - shuffled array copy.
+- `flatten(tbl) -> table` - recursively flattens nested array tables.
+- `uniq(tbl) -> table` - removes duplicates (first occurrence wins).
+- `uniq_by(tbl, fn) -> table` - uniqueness by computed key `fn(value, key)`.
+- `count(tbl, fn) -> integer` - number of entries where predicate is `true`.
+- `keys(tbl) -> table` - array of keys.
+- `values(tbl) -> table` - array of values.
+- `push(tbl, value) -> nil` - append to end.
+- `append(tbl, value) -> nil` - alias of `push`.
+- `pop(tbl) -> any|nil` - remove and return last element (or `nil`).
+- `shift(tbl) -> any|nil` - remove and return first element (or `nil`).
+- `prepend(tbl, value) -> nil` - insert at start.
+- `join(tbl, sep) -> string` - stringifies sequence values with separator.
 
 ### 11.4 `helpers.retry`
 
-helpers.retry implements an async retry loop for functions that may intermittently fail.
+helpers.retry implements an async retry loop for functions that may
+intermittently fail.
 
 #### `retry.run(fn, opts?) -> any`
 
-Calls fn() and returns its result. If fn() errors, Ward retries until success or the attempt limit is reached.
+Calls fn() and returns its result. If fn() errors, Ward retries until success
+or the attempt limit is reached.
 
 Options (opts table):
 
-- attempts (integer, default 3) — total attempts (minimum 1)
-- delay (duration, default `100ms`) — base delay between retries; accepts strings like `50ms`, `1.5s`, `2m`
-- max_delay (duration|nil) — optional cap on the delay; accepts the same duration strings
-- backoff (number, default 2.0) — multiplier applied to the delay after each failed attempt (minimum 1.0)
-- jitter (boolean, default false) — randomize delay to reduce thundering herd
-- jitter_ratio (number, default 0.2) — maximum relative jitter, clamped to 0..1
+- attempts (integer, default 3) - total attempts (minimum 1)
+- delay (duration, default `100ms`) - base delay between retries; accepts
+strings like `50ms`, `1.5s`, `2m`
+- max_delay (duration|nil) - optional cap on the delay; accepts the same
+duration strings
+- backoff (number, default 2.0) - multiplier applied to the delay after each
+failed attempt (minimum 1.0)
+- jitter (boolean, default false) - randomize delay to reduce thundering herd
+- jitter_ratio (number, default 0.2) - maximum relative jitter, clamped to 0..1
 
 Example:
 
@@ -1626,7 +1757,7 @@ print("ok:", res.status)
 
 ---
 
-## 12. `ward.crypto` — hashing and checksums
+## 12. `ward.crypto` - hashing and checksums
 
 ```lua
 local crypto = require("ward.crypto")
@@ -1656,7 +1787,7 @@ local file_digest = crypto.sha256_file("Cargo.toml")
 print("sha256(Cargo.toml) =", file_digest)
 ```
 
-## 13. `ward.log` — logging
+## 13. `ward.log` - logging
 
 ```lua
 local log = require("ward.log")
@@ -1672,7 +1803,7 @@ Ward log is intentionally minimal; use it for script-friendly logs.
 
 ---
 
-## 14. `ward.host` — platform and host resources
+## 14. `ward.host` - platform and host resources
 
 ```lua
 local host = require("ward.host")
@@ -1690,7 +1821,7 @@ Resource inspection (memory, CPU) for the host process.
 
 ---
 
-## 15. `ward.lifecycle` — shutdown hooks and signals
+## 15. `ward.lifecycle` - shutdown hooks and signals
 
 ```lua
 local lifecycle = require("ward.lifecycle")
@@ -1745,13 +1876,13 @@ term.println("lines:", r.stdout)
 -- progress demo
 local prog = term.progress({ total = 5, message = "Working" })
 for _ = 1, 5 do
-  time.sleep("200ms")()
+  time.sleep("200ms"):wait()
   prog:tick(1)
 end
 prog:finish("Done")
 ```
 
-## 17. `ward.template.minijinja` — templates
+## 17. `ward.template.minijinja` - templates
 
 MiniJinja is a fast, Rust-native Jinja2-like template engine.
 
@@ -1772,7 +1903,8 @@ print(out) -- Hello Ward!
 
 ### 17.2 `minijinja.render_async(template, context, opts?) -> string`
 
-Same as `render`, but runs the render on a blocking thread so it will not block the async runtime.
+Same as `render`, but runs the render on a blocking thread so it will not
+block the async runtime.
 
 ```lua
 local out = tpl.render_async("{{ n }}", { n = 42 })
