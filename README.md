@@ -236,7 +236,17 @@ quickly as a curated toolbox.
 Ward installs a dedicated `require("externals.<name>")` searcher. External
 modules are stored under Ward's data directory (XDG-style on Unix), for example:
 
-- `${XDG_DATA_HOME}/ward/externals/<name>` or `~/.local/share/ward/externals/<name>`
+- `${XDG_DATA_HOME}/ward/externals/.store/<id>` or `~/.local/share/ward/externals/.store/<id>`
+
+Checkouts live in a content-addressed store where `<id> = sha256(normalized URL +
+selector)`. For Git, the selector is one of `rev:<sha>`, `tag:<name>`,
+`branch:<name>`, or `head` (default). `ward.module.git/url` binds the logical
+name for the current Ward run, so multiple revisions can coexist on disk while
+scripts keep the ergonomic `require("externals.foo")`.
+
+Rebinding the same name to a different revision within a single run is rejected
+unless `force=true`, which also clears any cached module so the next `require`
+reloads it.
 
 Example (clone a Git repo into externals, then require it):
 
@@ -250,7 +260,8 @@ local info = m.git("https://github.com/<org>/<repo>.git", {
   -- force = true,     -- optional
 })
 
-print("installed at:", info.path)
+print("installed at:", info.store_path)
+print("store id:", info.id)
 -- Then: local lib = require(info.require)
 -- or
 -- local lib = require("externals.my_lib")
