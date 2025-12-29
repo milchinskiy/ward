@@ -1506,6 +1506,7 @@ Options (`opts` table):
 - `headers` (table) - header map `string -> string`.
 - `timeout` (number) - request timeout in **seconds**.
 - `follow_redirects` (boolean, default `true`) - redirects are followed
+- `insecure` (boolean, default `false`) - allow invalid TLS certificates.
 (limited to 10).
 - `into` (string|nil) - destination file path.
   - If omitted, Ward creates a unique file path under the OS temp directory.
@@ -1726,6 +1727,8 @@ Common patterns:
 
 - `encode(value) -> string`
 - `decode(string) -> value`
+- `encode_async(value) -> string`
+- `decode_async(string) -> value`
 
 Example (JSON):
 
@@ -1734,6 +1737,59 @@ local json = require("ward.convert.json")
 local s = json.encode({ a = 1, b = { true, false } })
 local t = json.decode(s)
 ```
+
+### 10.1 `ward.convert.json`
+
+Functions:
+
+- `json.encode(value, opts?) -> string`
+- `json.decode(text) -> value`
+- `json.encode_async(value, opts?) -> string` (runs on a blocking thread)
+- `json.decode_async(text) -> value` (runs on a blocking thread)
+
+`opts` for `encode`/`encode_async`:
+
+- `pretty` (boolean, default `false`) - pretty-print.
+- `indent` (integer, default `2`) - spaces per indent level (must be > 0).
+
+### 10.2 `ward.convert.yaml`
+
+Functions:
+
+- `yaml.encode(value) -> string`
+- `yaml.decode(text) -> value`
+- `yaml.encode_async(value) -> string` (blocking thread)
+- `yaml.decode_async(text) -> value` (blocking thread)
+
+### 10.3 `ward.convert.toml`
+
+Functions:
+
+- `toml.encode(value) -> string`
+- `toml.decode(text) -> value`
+- `toml.encode_async(value) -> string` (blocking thread)
+- `toml.decode_async(text) -> value` (blocking thread)
+
+### 10.4 `ward.convert.ini`
+
+Functions:
+
+- `ini.encode(table) -> string`
+- `ini.decode(text) -> table`
+- `ini.encode_async(table) -> string` (blocking thread)
+- `ini.decode_async(text) -> table` (blocking thread)
+
+`ini.encode` expects a table shaped like:
+
+```lua
+{
+  [""] = { root_key = "value" },       -- optional default section
+  section = { key1 = "v1", flag = true }
+}
+```
+
+All values are stringified; booleans/numbers are accepted and converted to
+strings.
 
 ---
 
@@ -1934,9 +1990,38 @@ local resources = require("ward.host.resources")
 
 Platform inspection helpers (OS, arch, etc.).
 
+- `platform.is_windows() -> boolean`
+- `platform.is_macos() -> boolean`
+- `platform.is_linux() -> boolean`
+- `platform.is_bsd() -> boolean`
+- `platform.is_unix() -> boolean`
+- `platform.os() -> string` (e.g., `"linux"`)
+- `platform.arch() -> string` (e.g., `"x86_64"`)
+- `platform.platform() -> string` (`"<os>-<arch>"`)
+- `platform.version() -> string` (long OS version, best-effort)
+- `platform.release() -> string` (kernel version, best-effort)
+- `platform.hostname() -> string`
+- `platform.exe_suffix() -> string` (`".exe"` on Windows, else `""`)
+- `platform.path_sep() -> string` (`"/"` or `"\\"`)
+- `platform.env_sep() -> string` (`":"` or `";"`)
+- `platform.newline() -> string` (`"\r\n"` on Windows, else `"\n"`)
+- `platform.endianness() -> string` (`"little"` or `"big"`)
+- `platform.shell() -> table` - array-like command for the default shell:
+  - Unix: `{ "sh", "-lc" }`
+  - Windows: `{ "cmd", "/C" }`
+- `platform.info() -> table` - one-shot snapshot containing the fields above
+  plus `is_windows`, `is_unix`, `is_bsd`, `platform`, `shell`.
+
 ### 14.2 `host.resources`
 
 Resource inspection (memory, CPU) for the host process.
+
+- `resources.get() -> table` returns:
+  - `memory.total`, `memory.available`, `memory.used`, `memory.free` (bytes)
+  - `cpu.load["1m"]`, `cpu.load["5m"]`, `cpu.load["15m"]` (load averages)
+  - `cpu.cores.logical` (integer), `cpu.cores.physical` (integer|nil)
+  - `uptime` (seconds)
+  - `hostname` (string, best-effort)
 
 ---
 
@@ -1960,6 +2045,23 @@ lifecycle.on_shutdown(function(reason)
   -- flush files, cleanup temp dirs
 end)
 ```
+
+Functions:
+
+- `lifecycle.on(signal, fn) -> id` - register a handler for a signal name/number
+  (`"HUP"`, `"INT"`, `"QUIT"`, `"USR1"`, `"USR2"`, `"PIPE"`, `"TERM"`, or a numeric code).
+  Returns a handler id.
+- `lifecycle.on_shutdown(fn) -> id` - register a shutdown callback (LIFO order).
+- `lifecycle.off(id) -> boolean` - remove a previously registered handler.
+- `lifecycle.request(code?) -> ()` - request shutdown; `code` is an optional exit code.
+- `lifecycle.requested() -> boolean` - whether shutdown has been requested.
+- `lifecycle.code() -> integer|nil` - shutdown exit code (if known).
+
+Notes:
+
+- Ctrl-C / SIGINT requests shutdown by default.
+- Shutdown callbacks run once in LIFO order; failures are best-effort and do not
+  prevent later callbacks.
 
 ---
 
