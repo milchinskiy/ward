@@ -819,7 +819,7 @@ Methods:
 - `stream:wait() -> line | nil, err`
   - `err` is `"eof"` when the stream ends.
 
-This object follows Ward’s "awaitable" contract (`:wait()`), so it can be
+This object follows Ward's "awaitable" contract (`:wait()`), so it can be
 used with `async.select(...)`.
 
 #### 6.3.5 `ByteStream` userdata (raw byte streaming)
@@ -842,7 +842,7 @@ Aliases:
 - `stream:read(n?)` is the same as `stream:wait(n?)`.
 - `stream(n?)` calls `stream:wait(n?)`.
 
-This object follows Ward’s "awaitable" contract, so it can be used with `async.select(...)`.
+This object follows Ward's "awaitable" contract, so it can be used with `async.select(...)`.
 
 Example (bytes):
 
@@ -953,7 +953,7 @@ abort-on-drop. Prefer structured tasks unless you have a clear reason to detach.
 
 #### `Task:wait() -> ...`
 
-Waits for the task to finish and returns the function’s return values.
+Waits for the task to finish and returns the function's return values.
 
 ```lua
 local n, s = t:wait()
@@ -1068,7 +1068,7 @@ Ward also accepts:
 The return value is:
 
 - `idx` - the **1-based** index into `list` that completed first
-- followed by that awaitable’s return values
+- followed by that awaitable's return values
 
 Note: `async.select` cancels the non-winning internal *waiters*
 (the race participants), but it does not automatically cancel arbitrary
@@ -2173,3 +2173,7 @@ local out = tpl.render_file("./templates/main.j2", {
 })
 print(out)
 ```
+
+### 18 LuaRocks Compatibility
+
+See [LuaRocks Compatibility](./luarocks-compatibility.md) for more information.
