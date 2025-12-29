@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Command;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 fn ward_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("ward"))
@@ -343,13 +343,13 @@ local result = retry.run(function()
     error("try again")
   end
   return "ok"
-end, { attempts = 4, delay_ms = 0, backoff = 1.0, jitter = true, jitter_ratio = 1.0 })
+end, { attempts = 4, delay = 0, backoff = 1.0, jitter = true, jitter_ratio = 1.0 })
 
 local single_attempts = 0
 local single = retry.run(function()
   single_attempts = single_attempts + 1
   return "done"
-end, { attempts = 0, delay_ms = 0, backoff = 0.5, max_delay_ms = 1 })
+end, { attempts = 0, delay = 0, backoff = 0.5, max_delay = 1 })
 
 print(json.encode({
   attempts = attempts,
