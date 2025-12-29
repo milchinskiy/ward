@@ -145,6 +145,7 @@ print(json.encode({{
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn module_git_allows_rebinding_with_force() {
     let temp = tempdir().expect("tempdir");
     let repo_dir = temp.path().join("repo");

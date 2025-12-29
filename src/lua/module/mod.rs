@@ -226,10 +226,7 @@ fn module_result(lua: &Lua, name: &str, id: &str, path: &Path, ok: bool) -> mlua
 }
 
 fn selector_from_git_opts(opts: &GitOpts) -> mlua::Result<String> {
-    let mut selector: Option<String> = None;
-    if let Some(rev) = &opts.rev {
-        selector = Some(format!("rev:{rev}"));
-    }
+    let mut selector = opts.rev.as_ref().map(|rev| format!("rev:{rev}"));
     if let Some(branch) = &opts.branch {
         if selector.is_some() {
             return Err(mlua::Error::external("only one of opts.rev/opts.branch/opts.tag may be set"));
@@ -453,10 +450,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
 
             if !target.exists() {
                 let tmp_dir = random_tmp_dir();
-                let tmp_parent = tmp_dir
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(externals_tmp_dir);
+                let tmp_parent = tmp_dir.parent().map_or_else(externals_tmp_dir, Path::to_path_buf);
                 tokio::fs::create_dir_all(tmp_parent)
                     .await
                     .map_err(mlua::Error::external)?;
