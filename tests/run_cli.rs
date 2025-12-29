@@ -121,12 +121,12 @@ fn timeout_is_enforced() {
         &temp,
         "sleep.lua",
         r#"local time = require("ward.time")
-time.sleep(0.5):wait()
+time.sleep("500ms"):wait()
 "#,
     );
 
     let output = ward_cmd()
-        .args(["run", "--timeout", "0.05"])
+        .args(["run", "--timeout", "50ms"])
         .arg(&script)
         .output()
         .expect("run output");

@@ -40,7 +40,7 @@ local time = require("ward.time")
 local json = require("ward.convert.json")
 
 local task = async.spawn(function(a, b)
-  time.sleep(0.01):wait()
+  time.sleep("10ms"):wait()
   return a + b, "ok"
 end, 2, 3)
 
@@ -71,7 +71,7 @@ local time = require("ward.time")
 local json = require("ward.convert.json")
 
 local task = async.spawn(function()
-  time.sleep(0.2):wait()
+  time.sleep("200ms"):wait()
   return "late"
 end)
 
@@ -161,7 +161,7 @@ fn select_prefers_lowest_ready_index() {
 local time = require("ward.time")
 local json = require("ward.convert.json")
 
-local fast_idx, fast_val = async.select({ time.sleep(0.01), time.sleep(0.05) })
+local fast_idx, fast_val = async.select({ time.sleep("10ms"), time.sleep("50ms") })
 local tied_idx, tied_val = async.select({ time.sleep(0), time.sleep(0) })
 
 print(json.encode({

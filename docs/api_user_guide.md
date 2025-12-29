@@ -604,7 +604,7 @@ Notes:
 - `cmd:stdin_file(path)` fails at spawn-time if the file cannot be opened.
 - `cmd:stderr_to_stdout(true)` merges stderr into stdout **best-effort**. Ordering may differ from shell `2>&1`. In capture mode (`output()`), merged data is returned in `stdout` and `stderr` is `nil`.
 
-- `cmd:timeout(...)` accepts milliseconds (number) or human strings like `"500ms"`, `"2s"`, `"1m"`. Pass `nil` to clear.
+- `cmd:timeout(...)` accepts whole seconds (number) or human strings like `"500ms"`, `"2s"`, `"1m"`. Pass `nil` to clear.
 
 - `cmd:stdin_null()` sets stdin to a closed stream (equivalent to shell `< /dev/null`).
 - `cmd:pipe(other_cmd_or_pipeline) -> Pipeline`
@@ -802,7 +802,7 @@ Builder methods:
 - `pl:timeout(ms|duration_string|nil) -> Pipeline`
 - `pl:pipe(cmd_or_pipeline) -> Pipeline`
 
-Timeouts accept milliseconds (number) or human strings (`"500ms"`, `"2s"`, `"1m"`). Pass `nil` to clear.
+Timeouts accept whole seconds (number) or human strings (`"500ms"`, `"2s"`, `"1m"`). Pass `nil` to clear.
 
 Terminal operations:
 
@@ -992,11 +992,11 @@ local async = require("ward.async")
 local time = require("ward.time")
 
 local t = async.spawn(function()
-  time.sleep(0.2)()
+  time.sleep("200ms"):wait()
   return "task"
 end)
 
-local idx, v = async.select({ t, time.sleep(0.05) })
+local idx, v = async.select({ t, time.sleep("50ms") })
 print("winner", idx, v)
 ```
 
@@ -1010,7 +1010,7 @@ This is mostly a convenience wrapper for readability and for writing higher-leve
 local async = require("ward.async")
 local time = require("ward.time")
 
-async.await(time.sleep(0.1))
+async.await(time.sleep("100ms"))
 ```
 
 ### 6.5.7 Examples
@@ -1104,15 +1104,16 @@ local time = require("ward.time")
 
 Accepts:
 
-- number: treated as seconds
-- table: `{ days, hours, minutes, seconds, millis, micros }` (all optional)
+- number: whole seconds
+- string: human readable duration (e.g. `500ms`, `1.5s`, `2h`)
 - Duration userdata
 
 Examples:
 
 ```lua
-local d1 = time.duration(1.5)
-local d2 = time.duration({ millis = 250 })
+local d1 = time.duration(2)
+local d2 = time.duration("250ms")
+local d3 = time.duration("2h")
 ```
 
 ### 7.5 Monotonic time
@@ -1132,22 +1133,22 @@ Examples:
 
 ```lua
 -- sleep
-time.sleep({ millis = 200 })()
+time.sleep("200ms")()
 
 -- after
-local v = time.after({ seconds = 1 }, function() return "done" end)()
+local v = time.after("1s", function() return "done" end)()
 print(v)
 
 -- interval
-local it = time.interval({ seconds = 1 })
+local it = time.interval("1s")
 for _ = 1, 3 do
   print("tick", it())
 end
 
 -- timeout
-local a = time.sleep({ seconds = 5 })
+local a = time.sleep("5s")
 local ok, err = pcall(function()
-  time.timeout(a, { millis = 200 })()
+  time.timeout(a, "200ms")()
 end)
 print(ok, err)
 ```
@@ -1280,7 +1281,7 @@ Example:
 ```lua
 local p = term.progress({ total = 10, message = "Working" })
 for _ = 1, 10 do
-  time.sleep({ millis = 150 })()
+  time.sleep("150ms")()
   p:tick(1)
 end
 p:finish("Done")
@@ -1676,7 +1677,7 @@ term.println("lines:", r.stdout)
 -- progress demo
 local prog = term.progress({ total = 5, message = "Working" })
 for _ = 1, 5 do
-  time.sleep({ millis = 200 })()
+  time.sleep("200ms")()
   prog:tick(1)
 end
 prog:finish("Done")
@@ -1751,4 +1752,3 @@ local out = tpl.render_file("./templates/main.j2", {
 })
 print(out)
 ```
-

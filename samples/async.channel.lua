@@ -18,7 +18,7 @@ for i = 1, workers do
 	tasks[i] = async.spawn(function()
 		local ok, res = pcall(function()
 			-- Simulate staggered workloads.
-			time.sleep(0.1 * i):wait()
+			time.sleep(string.format("%dms", 100 * i)):wait()
 
 			-- Run a subprocess (async under the hood).
 			local r = p.cmd("sh", "-lc", "echo worker=" .. tostring(i) .. "; uname -s"):output()

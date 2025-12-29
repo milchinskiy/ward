@@ -77,21 +77,21 @@ fn duration_math_and_monotonic_elapsed_are_reported() {
         r#"local time = require("ward.time")
 local json = require("ward.convert.json")
 
-local d_table = time.duration({ seconds = 1, millis = 250, micros = 500 })
-local d_number = time.duration(2.5)
+local d_number = time.duration(1)
+local d_string = time.duration("2500ms")
 
-local sum = d_table + d_number
-local diff = sum - d_table
-local mul = d_table * 2
+local sum = d_string + d_number
+local diff = sum - d_string
+local mul = d_string * 2
 local neg_abs = d_number:neg():abs()
 
 local instant = time.instant_now()
-time.sleep(0.01):wait()
+time.sleep("10ms"):wait()
 local elapsed = instant:elapsed()
 
 print(json.encode({
-  table_micros = d_table:micros(),
   number_micros = d_number:micros(),
+  string_micros = d_string:micros(),
   sum_micros = sum:micros(),
   diff_micros = diff:micros(),
   mul_micros = mul:micros(),
@@ -101,14 +101,14 @@ print(json.encode({
 "#,
     );
 
-    assert_eq!(value["table_micros"], Value::from(1_250_500i64));
-    assert_eq!(value["number_micros"], Value::from(2_500_000i64));
-    assert_eq!(value["sum_micros"], Value::from(3_750_500i64));
-    assert_eq!(value["diff_micros"], Value::from(2_500_000i64));
-    assert_eq!(value["mul_micros"], Value::from(2_501_000i64));
+    assert_eq!(value["number_micros"], Value::from(1_000_000i64));
+    assert_eq!(value["string_micros"], Value::from(2_500_000i64));
+    assert_eq!(value["sum_micros"], Value::from(3_500_000i64));
+    assert_eq!(value["diff_micros"], Value::from(1_000_000i64));
+    assert_eq!(value["mul_micros"], Value::from(5_000_000i64));
 
     let neg_abs_seconds = value["neg_abs_seconds"].as_f64().expect("neg_abs_seconds");
-    assert!((neg_abs_seconds - 2.5).abs() < 1e-9);
+    assert!((neg_abs_seconds - 1.0).abs() < 1e-9);
 
     let elapsed_millis = value["elapsed_millis"].as_i64().expect("elapsed_millis");
     assert!(elapsed_millis >= 5, "elapsed_millis too small after sleep: {elapsed_millis}");
@@ -121,19 +121,19 @@ fn timeout_interval_and_after_behaviors_match_contract() {
         r#"local time = require("ward.time")
 local json = require("ward.convert.json")
 
-local timeout = time.timeout(time.sleep(0.05), 0.005)
+local timeout = time.timeout(time.sleep("50ms"), "5ms")
 local timeout_ok, timeout_err = pcall(function()
   return timeout:wait()
 end)
 
-local interval = time.interval(0)
+local interval = time.interval("0s")
 local first_tick = interval:wait()
 local second_tick = interval()
 interval:reset()
 local reset_tick = interval:wait()
 
 local fired = false
-local after = time.after(0.001, function()
+local after = time.after("1ms", function()
   fired = true
   return "cb"
 end)

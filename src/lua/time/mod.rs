@@ -9,6 +9,7 @@ use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, RegistryKey, Table, UserData, UserDataMethods,
     Value,
 };
+use serde_ext_duration::parse_str as parse_duration_str;
 
 use chrono::{Datelike, Timelike};
 
@@ -717,55 +718,72 @@ fn from_timestamp(seconds: f64) -> mlua::Result<TimePoint> {
 }
 
 /// Accepts:
-/// - number: seconds (f64)
-/// - table: { days/hours/minutes/seconds/millis/micros }
+/// - number: whole seconds (e.g. `2`)
+/// - string: human-readable duration (e.g. "1.5s", "500ms", "2h")
 /// - Duration userdata
 fn parse_duration(value: Value) -> mlua::Result<Duration> {
     match value {
-        Value::Number(n) => duration_from_seconds(n).map(Duration::new),
-        #[allow(clippy::cast_precision_loss)]
-        Value::Integer(i) => duration_from_seconds(i as f64).map(Duration::new),
-        Value::Table(t) => {
-            let days = t.get::<Option<f64>>("days")?.unwrap_or(0.0);
-            let hours = t.get::<Option<f64>>("hours")?.unwrap_or(0.0);
-            let minutes = t.get::<Option<f64>>("minutes")?.unwrap_or(0.0);
-            let seconds = t.get::<Option<f64>>("seconds")?.unwrap_or(0.0);
-            let millis = t.get::<Option<f64>>("millis")?.unwrap_or(0.0);
-            let micros = t.get::<Option<f64>>("micros")?.unwrap_or(0.0);
-
-            let total_seconds = seconds
-                + (minutes * 60.0)
-                + (hours * 3_600.0)
-                + (days * 86_400.0)
-                + (millis / 1_000.0)
-                + (micros / 1_000_000.0);
-
-            duration_from_seconds(total_seconds).map(Duration::new)
-        }
+        Value::Number(n) => duration_from_seconds_number(n),
+        Value::Integer(i) => duration_from_integer(i),
+        Value::String(s) => duration_from_string(&s).map(Duration::new),
         Value::UserData(ud) => ud.borrow::<Duration>().map_or_else(
             |_| {
                 Err(mlua::Error::external(
-                    "userdata is not a Duration (expected number, table, or Duration)",
+                    "userdata is not a Duration (expected number, string, or Duration)",
                 ))
             },
             |d| Ok(d.clone()),
         ),
-        _ => Err(mlua::Error::external("duration must be number, table, or Duration userdata")),
+        _ => Err(mlua::Error::external("duration must be number, string, or Duration userdata")),
     }
 }
 
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn duration_from_seconds(seconds: f64) -> mlua::Result<ChronoDuration> {
-    if !seconds.is_finite() {
+fn duration_from_string(value: &mlua::String) -> mlua::Result<ChronoDuration> {
+    let raw = value
+        .to_str()
+        .map_err(|_| mlua::Error::external("duration string must be valid utf-8"))?;
+    duration_from_human(raw.as_ref())
+}
+
+fn duration_from_human(raw: &str) -> mlua::Result<ChronoDuration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(mlua::Error::external("duration string cannot be empty"));
+    }
+
+    let is_negative = trimmed.starts_with('-');
+    let magnitude = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
+
+    let std_duration =
+        parse_duration_str(magnitude).map_err(|_| mlua::Error::external("failed to parse duration string"))?;
+    let chrono_duration = std_to_chrono(std_duration)?;
+
+    Ok(if is_negative { -chrono_duration } else { chrono_duration })
+}
+
+fn duration_from_seconds_number(n: f64) -> mlua::Result<Duration> {
+    if !n.is_finite() {
         return Err(mlua::Error::external("duration must be finite"));
     }
-
-    let micros = seconds * 1_000_000.0;
-    if micros > i64::MAX as f64 || micros < i64::MIN as f64 {
-        return Err(mlua::Error::external("duration is out of range"));
+    let truncated = n.trunc();
+    if (n - truncated).abs() > f64::EPSILON {
+        return Err(mlua::Error::external(
+            "duration number must be whole seconds; use a string for sub-second values",
+        ));
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let i = truncated as i64;
+    duration_from_integer(i)
+}
 
-    Ok(ChronoDuration::microseconds(micros.round() as i64))
+fn duration_from_integer(i: i64) -> mlua::Result<Duration> {
+    let is_negative = i.is_negative();
+    let magnitude = i.abs();
+    let spec = format!("{magnitude}s");
+    let std_duration =
+        parse_duration_str(&spec).map_err(|_| mlua::Error::external("failed to parse duration number"))?;
+    let chrono_duration = std_to_chrono(std_duration)?;
+    Ok(Duration::new(if is_negative { -chrono_duration } else { chrono_duration }))
 }
 
 fn chrono_to_std_nonneg(d: ChronoDuration) -> mlua::Result<StdDuration> {

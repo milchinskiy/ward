@@ -30,7 +30,7 @@ for wid = 1, WORKERS do
 
 			local ok, payload = pcall(function()
 				-- Simulate work variance.
-				time.sleep(0.05 * (wid % 3 + 1))()
+				time.sleep(string.format("%dms", 50 * (wid % 3 + 1))):wait()
 
 				-- Do some real I/O (async under the hood): run a trivial command.
 				local r = process

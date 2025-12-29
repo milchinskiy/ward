@@ -11,13 +11,13 @@ local async = require("ward.async")
 local time = require("ward.time")
 
 local ch = async.channel({ capacity = 16 })
-local tick_every = 0.25
+local tick_every = "250ms"
 local timer = time.sleep(tick_every) -- one-shot timer; we re-arm after it fires
 
 -- Producer: emit some messages on its own cadence, then close the channel.
 local producer = async.spawn(function()
 	for i = 1, 5 do
-		time.sleep(0.40):wait() -- awaitable sleep; `()` calls the awaitable
+		time.sleep("400ms"):wait() -- awaitable sleep; `()` calls the awaitable
 		ch:send({ n = i, msg = "hello" })
 	end
 	ch:close()

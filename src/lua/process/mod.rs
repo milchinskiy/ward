@@ -175,27 +175,51 @@ fn duration_to_millis(dur: Duration) -> u64 {
 fn parse_timeout_value(v: Value, label: &str) -> LuaResult<Option<u64>> {
     match v {
         Value::Nil => Ok(None),
-        Value::Integer(i) => Ok(Some(u64::try_from(i.max(0)).unwrap_or(u64::MAX))),
+        #[allow(clippy::cast_precision_loss)]
+        Value::Integer(i) => duration_from_number(i as f64, label),
         Value::Number(n) => {
             if !n.is_finite() {
                 return Err(mlua::Error::RuntimeError(format!("{label}: timeout must be finite")));
             }
-            let n = n.max(0.0);
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Ok(Some((n * 1000.0) as u64))
-        }
-        Value::String(s) => {
-            let raw = s.to_str()?.to_owned();
-            match parse_duration_str(raw.as_str()) {
-                Ok(d) => Ok(Some(duration_to_millis(d))),
-                Err(e) => Err(mlua::Error::RuntimeError(format!("{label}: invalid duration '{raw}': {e}"))),
-            }
-        }
+            duration_from_number(n, label)
+        },
+        Value::String(s) => duration_from_human_string(s.to_str()?.as_ref(), label),
         other => Err(mlua::Error::RuntimeError(format!(
             "{label}: timeout expects number or duration string, got {}",
             other.type_name()
         ))),
     }
+}
+
+fn duration_from_number(n: f64, label: &str) -> LuaResult<Option<u64>> {
+    let truncated = n.trunc();
+    if (n - truncated).abs() > f64::EPSILON {
+        return Err(mlua::Error::RuntimeError(format!(
+            "{label}: duration number must be whole seconds; use a string for sub-second values"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let i = truncated as i64;
+    if i.is_negative() {
+        return Err(mlua::Error::RuntimeError(format!("{label}: duration must be non-negative")));
+    }
+    duration_from_human_string(i.to_string().as_str(), label)
+}
+
+fn duration_from_human_string(raw: &str, label: &str) -> LuaResult<Option<u64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(mlua::Error::RuntimeError(format!("{label}: duration string cannot be empty")));
+    }
+
+    if trimmed.starts_with('-') {
+        return Err(mlua::Error::RuntimeError(format!("{label}: duration must be non-negative")));
+    }
+
+    let duration = parse_duration_str(trimmed)
+        .map_err(|e| mlua::Error::RuntimeError(format!("{label}: invalid duration '{trimmed}': {e}")))?;
+
+    Ok(Some(duration_to_millis(duration)))
 }
 
 fn shell_defaults_table(lua: &Lua, defaults: &ShellDefaults) -> LuaResult<Table> {

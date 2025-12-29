@@ -4,10 +4,7 @@ local time = require("ward.time")
 
 -- Convenience: sleep wrapper (adapt if your time API differs)
 local function sleep_ms(ms)
-  -- if you have time.sleep(ms) as awaitable:
-  -- return time.sleep(ms)()
-  -- otherwise adapt to your actual time module.
-  return time.sleep(ms / 1000)()
+  return time.sleep(string.format("%dms", ms)):wait()
 end
 
 local ansi = term.ansi
