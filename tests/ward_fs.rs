@@ -50,7 +50,7 @@ local mkdir_res = fs.mkdir(nested, { recursive = true, mode = 493, force = true 
 
 local text_path = path.new(nested):join("note.txt")
 local write_res = fs.write(text_path, "hello", { mode = "overwrite" })
-local append_res = fs.write(text_path, " world", { append = true })
+local append_res = fs.write(text_path, " world", { mode = "append" })
 local text_content = fs.read(text_path, { mode = "text" })
 if type(text_content) == "table" then
   local chars = {}

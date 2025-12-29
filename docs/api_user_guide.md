@@ -403,7 +403,6 @@ Write data to a file.
 Options (selected):
 
 - `mode` (`"overwrite"|"append"|"prepend"|"binary"`, default `"overwrite"`)
-- `append` (boolean, optional convenience; equivalent to `mode="append"`)
 - `binary` (boolean, default `false`) — convert `data` as bytes
 
 Notes:

@@ -1387,12 +1387,6 @@ impl WriteOpts {
                 binary: table.get::<Option<bool>>("binary")?.unwrap_or(false),
             };
 
-            if let Ok(append) = table.get::<bool>("append")
-                && append
-            {
-                opts.mode = WriteMode::Append;
-            }
-
             if let Ok(mode) = table.get::<Option<String>>("mode")
                 && let Some(mode) = mode
             {
@@ -1405,16 +1399,6 @@ impl WriteOpts {
                     }
                     _ => WriteMode::Overwrite,
                 };
-                if mode.eq_ignore_ascii_case("binary") {
-                    opts.binary = true;
-                }
-            }
-
-            if let Ok(mode) = table.get::<Option<String>>("data_mode")
-                && let Some(mode) = mode
-                && mode.eq_ignore_ascii_case("binary")
-            {
-                opts.binary = true;
             }
 
             Ok(opts)
