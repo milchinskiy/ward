@@ -1591,6 +1591,125 @@ end
 print("checked out into", r.path, "bytes", r.size)
 ```
 
+### 9.3 `ward.module` - external module manager
+
+`ward.module` downloads third-party Lua modules into Ward's data directory and
+exposes them via `require("externals.<name>")` for the lifetime of the
+process. Downloads are content-addressed so multiple revisions can coexist and
+be reused across runs.
+
+```lua
+local module = require("ward.module")
+```
+
+#### Where modules live
+
+- Base directory: `${XDG_DATA_HOME}/ward/externals` (or
+  `~/.local/share/ward/externals` if `XDG_DATA_HOME` is unset).
+- Content-addressed store: `${base}/.store/<id>`, where `<id>` is
+  `sha256(normalized_url + "\n" + selector)`.
+- A per-process binding map ensures `require("externals.<name>")` resolves to
+  the revision selected earlier in the same run. Rebinding to a different id is
+  rejected unless `force=true`, in which case the next `require` reloads the
+  module.
+
+#### Naming rules
+
+- Default name comes from the URL basename (extensions, `.git`, `.lua`, `.zip`,
+  `.tar.gz`, `.tgz`, and query/fragment removed).
+- Names are canonicalized to lowercase with non-alphanumeric separators folded
+  into `_`. Leading digits are prefixed with `_`.
+- `require("externals.<name>.<submodule>")` is supported; segments must be
+  alphanumeric or `_`.
+
+#### 9.3.1 `module.dir() -> string`
+
+Returns the absolute path to the externals base directory.
+
+```lua
+print(module.dir())
+```
+
+#### 9.3.2 `module.git(url, opts?) -> { ok, name, require, path, store_path, id }`
+
+Clone a Git repository into the externals store and bind it for `require`.
+
+Options (all optional):
+
+- `name` (string) - override derived name and `externals.<name>` binding.
+- Exactly one of `rev`, `branch`, or `tag` selects a revision; default is
+  `head`. Different selectors produce different store ids.
+- `force` (bool, default `false`) - allow rebinding an already-bound name to a
+  new id (also clears cached `require`d module).
+- `depth` (integer) - shallow clone depth (passed to `ward.net.fetch.git`).
+- `recursive` (bool) - fetch submodules (`git --recurse-submodules`).
+- `timeout` (number, seconds) - overall fetch timeout.
+- `max_bytes` (integer) - abort if transfer exceeds this many bytes.
+- `filter_blobs` (bool) - request partial clone with blob filtering when
+  supported by the remote.
+
+Return table:
+
+- `ok` (bool) - whether the checkout succeeded.
+- `name` (string) - canonicalized name.
+- `require` (string) - require target (`externals.<name>`).
+- `path` / `store_path` (string) - final checkout directory.
+- `id` (string) - content-addressed id.
+
+Example (pin to a tag and require a submodule):
+
+```lua
+local module = require("ward.module")
+local json = require("ward.convert.json")
+
+local result = module.git("https://github.com/org/repo.git", {
+  name = "my_lib",
+  tag = "v1.2.3",
+  depth = 1,
+  recursive = true,
+})
+
+assert(result.ok, "git fetch failed")
+local api = require(result.require .. ".api")
+print(json.encode({ id = result.id, path = result.path, ok = result.ok }))
+```
+
+#### 9.3.3 `module.url(url, opts?) -> { ok, name, require, path, store_path, id }`
+
+Download a single Lua file and bind it as `externals.<name>`. The URL content is
+stored as `init.lua` inside its store directory.
+
+Options (all optional):
+
+- `name` (string) - override derived name.
+- `insecure` (bool, default `false`) - allow invalid TLS certificates.
+- `follow_redirects` (bool, default `true`).
+- `retries` (integer, default `5`, minimum `1`).
+- `retry_delay` (milliseconds, default `2000`) - delay between retries.
+- `force` (bool, default `false`) - rebind an existing name to the downloaded id.
+- `timeout` (number, seconds) - overall request timeout.
+- `max_bytes` (integer) - abort if download exceeds this size.
+- `method` (string) - HTTP method (default `GET`).
+- `headers` (table<string, string>) - additional request headers.
+
+Return table fields match `module.git`.
+
+Example (with custom headers and POST body):
+
+```lua
+local module = require("ward.module")
+
+local result = module.url("https://example.com/plugin.lua", {
+  headers = { Authorization = "Bearer TOKEN" },
+  method = "POST",
+  retry_delay = 500,
+})
+
+if not result.ok then error("download failed") end
+local plugin = require(result.require)
+print(plugin.version())
+```
+
 ---
 
 ## 10. `ward.convert` - serialization formats
