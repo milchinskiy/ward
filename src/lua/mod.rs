@@ -7,6 +7,7 @@ pub mod fs;
 pub mod helpers;
 pub mod host;
 pub mod io;
+pub mod ipc;
 pub mod lifecycle;
 pub mod log;
 pub mod module;
@@ -37,6 +38,7 @@ pub fn modules(lua: &mlua::Lua) -> mlua::Result<Vec<(String, mlua::Table)>> {
         ("env".to_string(), env::define(lua)?),
         ("fs".to_string(), fs::define(lua)?),
         ("host".to_string(), host::define(lua)?),
+        ("ipc".to_string(), ipc::define(lua)?),
         ("helpers".to_string(), helpers::define(lua)?),
         ("io".to_string(), io::define(lua)?),
         ("lifecycle".to_string(), lifecycle::define(lua)?),
