@@ -1,10 +1,34 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Stdio;
 use tempfile::tempdir;
 
 fn ward_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("ward"))
+}
+
+fn run_lua_script_raw(body: &str) -> (String, String) {
+    let temp = tempdir().expect("tempdir");
+    let script = write_script(&temp, "script.lua", body);
+
+    let mut cmd = ward_cmd();
+    cmd.args(["run", script.to_string_lossy().as_ref()]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let output = cmd.output().expect("run output");
+
+    assert!(
+        output.status.success(),
+        "lua script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
 }
 
 fn write_script(temp: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
@@ -79,4 +103,22 @@ print(json.encode({
     assert_eq!(value["message_after_finish"], Value::from("Done"));
     assert_eq!(value["finish_ok"], Value::Bool(true));
     assert_eq!(value["finished_total"], Value::from(3));
+}
+
+#[test]
+fn term_print_functions_accept_varargs() {
+    let script = r#"local term = require("ward.term")
+term.println("P", "Q")
+term.print("A", "B", 1)
+term.println()
+
+term.eprintln("E1", "E2")
+term.eprint("X", "Y", nil)
+term.eprintln()
+"#;
+
+    let (stdout, stderr) = run_lua_script_raw(script);
+
+    assert_eq!(stdout, "P\tQ\nA\tB\t1\n");
+    assert_eq!(stderr, "E1\tE2\nX\tY\tnil\n");
 }

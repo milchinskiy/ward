@@ -55,36 +55,36 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     // Non-interactive helpers (synchronous)
     term.set(
         "print",
-        lua.create_function(|_, v: Value| {
-            write_value(false, v)?;
+        lua.create_function(|lua, mv: MultiValue| {
+            write_values_stdout(lua, false, mv)?;
             Ok(true)
         })?,
     )?;
     term.set(
         "println",
-        lua.create_function(|_, v: Option<Value>| {
-            if let Some(v) = v {
-                write_value(true, v)?;
-            } else {
+        lua.create_function(|lua, mv: MultiValue| {
+            if mv.is_empty() {
                 println!();
+            } else {
+                write_values_stdout(lua, true, mv)?;
             }
             Ok(true)
         })?,
     )?;
     term.set(
         "eprint",
-        lua.create_function(|_, v: Value| {
-            write_value_stderr(false, v)?;
+        lua.create_function(|lua, mv: MultiValue| {
+            write_values_stderr(lua, false, mv)?;
             Ok(true)
         })?,
     )?;
     term.set(
         "eprintln",
-        lua.create_function(|_, v: Option<Value>| {
-            if let Some(v) = v {
-                write_value_stderr(true, v)?;
-            } else {
+        lua.create_function(|lua, mv: MultiValue| {
+            if mv.is_empty() {
                 eprintln!();
+            } else {
+                write_values_stderr(lua, true, mv)?;
             }
             Ok(true)
         })?,
@@ -586,11 +586,25 @@ async fn password_async(
     }
 }
 
-fn write_value(newline: bool, v: Value) -> mlua::Result<()> {
-    let s = match v {
-        Value::String(s) => s.to_str()?.to_string(),
-        other => format!("{other:?}"),
-    };
+fn join_values(lua: &Lua, mv: MultiValue) -> mlua::Result<String> {
+    // Match Lua's print() convention: tostring each value and join with tabs.
+    let tostring: mlua::Function = lua.globals().get("tostring")?;
+    let mut out = String::new();
+    for (i, v) in mv.into_iter().enumerate() {
+        if i > 0 {
+            out.push('\t');
+        }
+        let s: String = tostring.call(v)?;
+        out.push_str(&s);
+    }
+    Ok(out)
+}
+
+fn write_values_stdout(lua: &Lua, newline: bool, mv: MultiValue) -> mlua::Result<()> {
+    if mv.is_empty() {
+        return Ok(());
+    }
+    let s = join_values(lua, mv)?;
     if newline {
         println!("{s}");
     } else {
@@ -600,11 +614,11 @@ fn write_value(newline: bool, v: Value) -> mlua::Result<()> {
     Ok(())
 }
 
-fn write_value_stderr(newline: bool, v: Value) -> mlua::Result<()> {
-    let s = match v {
-        Value::String(s) => s.to_str()?.to_string(),
-        other => format!("{other:?}"),
-    };
+fn write_values_stderr(lua: &Lua, newline: bool, mv: MultiValue) -> mlua::Result<()> {
+    if mv.is_empty() {
+        return Ok(());
+    }
+    let s = join_values(lua, mv)?;
     if newline {
         eprintln!("{s}");
     } else {
