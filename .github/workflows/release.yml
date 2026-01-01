@@ -1,0 +1,139 @@
+---
+name: Release
+on:
+  push:
+    tags: [v*]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+        type: string
+permissions:
+  contents: write
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+jobs:
+  create_release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag exists (workflow_dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if ! git show-ref --tags --verify --quiet "refs/tags/${TAG}"; then
+            echo "Tag ${TAG} not found. Create/push the tag first." >&2
+            exit 1
+          fi
+
+      - name: Create release (if missing)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+  build_and_upload:
+    needs: create_release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      - name: Install Rust (rustup)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+          rustc -V
+          cargo -V
+      - name: Install musl tools (musl target only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          fi
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build (release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Package archive + sha256
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN: ward
+        run: |
+          set -euo pipefail
+          OUT_DIR="dist"
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR"
+          BASE="${BIN}-${TARGET}"
+          STAGE="${OUT_DIR}/${BASE}"
+          mkdir -p "$STAGE"
+          cp "target/${TARGET}/release/${BIN}" "$STAGE/"
+
+          # Optional extras
+          for f in README.md LICENSE-APACHE LICENSE-MIT CHANGELOG.md NOTICE; do
+            if [ -f "$f" ]; then cp "$f" "$STAGE/"; fi
+          done
+          tar -C "$OUT_DIR" -czf "${OUT_DIR}/${BASE}.tar.gz" "${BASE}"
+          FILE="${OUT_DIR}/${BASE}.tar.gz"
+          export FILE
+          python - << 'PY'
+          import hashlib, pathlib, os
+          file = pathlib.Path(os.environ["FILE"])
+          h = hashlib.sha256()
+          with file.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024*1024), b""):
+              h.update(chunk)
+          file.with_suffix(file.suffix + ".sha256").write_text(f"{h.hexdigest()}  {file.name}\n", encoding="utf-8")
+          PY
+          echo "FILE=$FILE" >> "$GITHUB_ENV"
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.RELEASE_TAG }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          gh release upload "$TAG" "$FILE" "${FILE}.sha256" --clobber

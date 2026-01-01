@@ -1,0 +1,12 @@
+[book]
+title = "Ward API user guide"
+authors = ["Ward contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/milchinskiy/ward"
+additional-css = ["custom.css"]
