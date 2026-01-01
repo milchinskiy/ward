@@ -13,6 +13,7 @@ permissions:
   contents: write
 env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  GH_REPO: ${{ github.repository }}
 jobs:
   create_release:
     runs-on: ubuntu-latest
@@ -20,6 +21,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Ensure GitHub CLI is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+          gh --version
 
       - name: Validate tag exists (workflow_dispatch only)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -40,10 +51,10 @@ jobs:
           TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "${GH_REPO}" >/dev/null 2>&1; then
             echo "Release $TAG already exists."
           else
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            gh release create "$TAG" --repo "${GH_REPO}" --title "$TAG" --generate-notes
           fi
   build_and_upload:
     needs: create_release
@@ -63,6 +74,17 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+
+      - name: Ensure GitHub CLI is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+          gh --version
+
       - name: Install Rust (rustup)
         shell: bash
         run: |
@@ -136,4 +158,4 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          gh release upload "$TAG" "$FILE" "${FILE}.sha256" --clobber
+          gh release upload "$TAG" --repo "${GH_REPO}" "$FILE" "${FILE}.sha256" --clobber
