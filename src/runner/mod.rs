@@ -1,4 +1,4 @@
-use mlua::{ChunkMode, HookTriggers, Lua, LuaOptions, StdLib, VmState};
+use mlua::{ChunkMode, HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 use std::{
     ffi::OsString,
     path::Path,
@@ -189,5 +189,37 @@ fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
     // Enable `require("externals.<name>")` by installing a dedicated searcher.
     crate::lua::module::install_externals_searcher(lua)?;
 
+    // Lua ergonomics: `require("foo")` should search the current working directory
+    // by default, as stock Lua does (./?.lua;./?/init.lua).
+    ensure_cwd_in_package_path(lua)?;
+
+    Ok(())
+}
+
+fn ensure_cwd_in_package_path(lua: &Lua) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let path: String = package.get("path")?;
+    let parts: Vec<&str> = path.split(';').collect();
+
+    // Match Lua's default search order.
+    let mut prefix: Vec<&str> = Vec::new();
+    if !parts.contains(&"./?.lua") {
+        prefix.push("./?.lua");
+    }
+    if !parts.contains(&"./?/init.lua") {
+        prefix.push("./?/init.lua");
+    }
+
+    if prefix.is_empty() {
+        return Ok(());
+    }
+
+    let mut new_path = String::new();
+    for p in prefix {
+        new_path.push_str(p);
+        new_path.push(';');
+    }
+    new_path.push_str(&path);
+    package.set("path", new_path)?;
     Ok(())
 }
