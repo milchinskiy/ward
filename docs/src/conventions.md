@@ -1,4 +1,6 @@
-### Common
+# Conventions
+
+## Common
 
 - `nil|string` means the function returns either `nil` or a Lua string.
 - "bytes string" means a Lua string whose contents are raw bytes (binary-safe).
@@ -8,7 +10,7 @@ ward.fs.path objects).
 
 ---
 
-### CLI sandbox limits (`ward run`)
+## CLI sandbox limits (`ward run`)
 
 `ward run` executes a Lua file under a configurable sandbox. The most commonly
 used switches are:

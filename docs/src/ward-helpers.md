@@ -1,3 +1,5 @@
+# ward.helpers
+
 - [`helpers.number`](#helpersnumber)
 - [`helpers.string`](#helpersstring)
 - [`helpers.table`](#helperstable)

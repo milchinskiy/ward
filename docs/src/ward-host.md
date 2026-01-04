@@ -1,3 +1,5 @@
+# ward.host
+
 - [`host.platform`](#hostplatform)
 - [`host.resources`](#hostresources)
 

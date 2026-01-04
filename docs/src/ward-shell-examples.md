@@ -1,3 +1,5 @@
+# Ward shell examples
+
 - ["set -e" style: assert on failures](#set--e-style-assert-on-failures)
 - [Download to temp dir and process](#download-to-temp-dir-and-process)
 

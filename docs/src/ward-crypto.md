@@ -1,3 +1,5 @@
+# ward.crypto
+
 ```lua
 local crypto = require("ward.crypto")
 ```

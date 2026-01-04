@@ -1,3 +1,5 @@
+# ward.env
+
 - [`env.get(key, default?) -> string|nil`](#envgetkey-default---stringnil)
 - [`env.set(key, value) -> boolean`](#envsetkey-value---boolean)
 - [`env.export(key, value?) -> boolean`](#envexportkey-value---boolean)

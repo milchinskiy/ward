@@ -1,10 +1,11 @@
+# ward.convert
+
 - [`ward.convert.json`](#wardconvertjson)
 - [`ward.convert.yaml`](#wardconvertyaml)
 - [`ward.convert.toml`](#wardconverttoml)
 - [`ward.convert.ini`](#wardconvertini)
 
 ```lua
-local convert = require("ward.convert")
 local json = require("ward.convert.json")
 local yaml = require("ward.convert.yaml")
 local toml = require("ward.convert.toml")

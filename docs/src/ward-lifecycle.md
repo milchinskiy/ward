@@ -1,3 +1,5 @@
+# ward.lifecycle
+
 ```lua
 local lifecycle = require("ward.lifecycle")
 ```

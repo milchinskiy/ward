@@ -1,8 +1,13 @@
-- [`minijinja.render(template, context, opts?) -> string`](#minijinjarendertemplate-context-opts---string)
-- [`minijinja.render_async(template, context, opts?) -> string`](#minijinjarender_asynctemplate-context-opts---string)
-- [`minijinja.render_file(path, context, opts?) -> string`](#minijinjarender_filepath-context-opts---string)
-- [`minijinja.render_file_async(path, context, opts?) -> string`](#minijinjarender_file_asyncpath-context-opts---string)
-- [Options](#175-options)
+# ward.template
+
+- [`minijinja`](#minijinja)
+  - [`minijinja.render(template, context, opts?) -> string`](#minijinjarendertemplate-context-opts---string)
+  - [`minijinja.render_async(template, context, opts?) -> string`](#minijinjarender_asynctemplate-context-opts---string)
+  - [`minijinja.render_file(path, context, opts?) -> string`](#minijinjarender_filepath-context-opts---string)
+  - [`minijinja.render_file_async(path, context, opts?) -> string`](#minijinjarender_file_asyncpath-context-opts---string)
+  - [Options](#options)
+
+## MiniJinja
 
 MiniJinja is a fast, Rust-native Jinja2-like template engine.
 

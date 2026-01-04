@@ -1,3 +1,5 @@
+# ward.term
+
 - [Input (returns awaitables)](#input-returns-awaitables)
 - [Printing](#printing)
 - [Screen control and tty](#screen-control-and-tty)

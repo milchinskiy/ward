@@ -1,3 +1,5 @@
+# ward.fs
+
 - [Existence and type checks](#existence-and-type-checks)
 - [Path utilities](#path-utilities)
   - [`fs.path` - pure path manipulation (Path userdata)](#fspath---pure-path-manipulation-path-userdata)

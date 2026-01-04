@@ -1,3 +1,5 @@
+# ward.io
+
 - [`io.read_all(opts?) -> bytes string`](#ioread_allopts---bytes-string)
 - [`io.read_line() -> byts string|nil`](#ioread_line---byts-stringnil)
 - [`io.read_lines() -> function`](#ioread_lines---function)
