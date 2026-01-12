@@ -8,6 +8,10 @@ include breaking changes.
 
 ---
 
+## v0.1.1
+
+- Minor bugfix
+
 ## v0.1.0
 
 - Initial release
