@@ -198,6 +198,16 @@ fn ensure_cwd_in_package_path(lua: &Lua) -> mlua::Result<()> {
     let path: String = package.get("path")?;
     let parts: Vec<&str> = path.split(';').collect();
 
+    // NOTE: prevent system-installed Lua C modules from being loaded
+    // as they may not be compatible with the ward runtime/sandbox
+    package.set("cpath", "")?;
+    package.set(
+        "loadlib",
+        mlua::Value::Function(lua.create_function(|_, (_libname, _funcname): (mlua::Value, mlua::Value)| {
+            Ok((mlua::Value::Nil, "C modules are disabled by Ward".to_string()))
+        })?),
+    )?;
+
     // Match Lua's default search order.
     let mut prefix: Vec<&str> = Vec::new();
     if !parts.contains(&"./?.lua") {
