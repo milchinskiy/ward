@@ -63,7 +63,7 @@ or
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/master/install.sh \
-    | WARD_FLAVOR=musl WARD_VERSION=v0.1.1 INSTALL_DIR=~/.local/bin \
+    | WARD_FLAVOR=musl WARD_VERSION=v0.1.2 INSTALL_DIR=~/.local/bin \
     bash
 ```
 
@@ -244,7 +244,7 @@ quickly as a curated toolbox.
 
 ## External modules via `ward.module`
 
-Ward installs a dedicated `require("externals.<name>")` searcher. External
+Ward installs a dedicated `require("<name>")` searcher. External
 modules are stored under Ward's data directory (XDG-style on Unix), for example:
 
 - `${XDG_DATA_HOME}/ward/externals/.store/<id>` or `~/.local/share/ward/externals/.store/<id>`
@@ -253,7 +253,7 @@ Checkouts live in a content-addressed store where `<id> = sha256(normalized URL 
 selector)`. For Git, the selector is one of `rev:<sha>`, `tag:<name>`,
 `branch:<name>`, or `head` (default). `ward.module.git/url` binds the logical
 name for the current Ward run, so multiple revisions can coexist on disk while
-scripts keep the ergonomic `require("externals.foo")`.
+scripts keep the ergonomic `require("foo")`.
 
 Rebinding the same name to a different revision within a single run is rejected
 unless `force=true`, which also clears any cached module so the next `require`
@@ -275,7 +275,7 @@ print("installed at:", info.store_path)
 print("store id:", info.id)
 -- Then: local lib = require(info.require)
 -- or
--- local lib = require("externals.my_lib")
+-- local lib = require("my_lib")
 ```
 
 ## Development

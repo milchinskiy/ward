@@ -8,6 +8,11 @@ include breaking changes.
 
 ---
 
+## v0.1.2
+
+- Remove custom `package` searcher
+- Minor bugfix
+
 ## v0.1.1
 
 - Minor bugfix

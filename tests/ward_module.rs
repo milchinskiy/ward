@@ -71,11 +71,13 @@ fn module_git_clones_local_repo_and_reports_paths() {
     );
 
     let init_lua = "return { greet = function() return \"hi\" end }\n";
-    std::fs::write(repo_dir.join("init.lua"), init_lua).expect("write init.lua");
+    let lua_dir = repo_dir.join("lua").join("my_repo");
+    std::fs::create_dir_all(&lua_dir).expect("lua dir");
+    std::fs::write(lua_dir.join("init.lua"), init_lua).expect("write init.lua");
 
     assert!(
         Command::new("git")
-            .args(["add", "init.lua"])
+            .args(["add", "lua/my_repo/init.lua"])
             .current_dir(&repo_dir)
             .status()
             .expect("git add")
@@ -132,7 +134,7 @@ print(json.encode({{
     let expected_name = Value::from("my_repo");
     assert_eq!(value["ok"], Value::Bool(true));
     assert_eq!(value["name"], expected_name);
-    assert_eq!(value["require"], Value::from("externals.my_repo"));
+    assert_eq!(value["require"], Value::from("my_repo"));
     assert_eq!(value["dir"], Value::from(externals_dir.to_string_lossy().as_ref()));
     assert_eq!(value["id"], Value::from(expected_id.as_str()));
     assert_eq!(value["store_path"], Value::from(expected_store.to_string_lossy().as_ref()));
@@ -140,7 +142,7 @@ print(json.encode({{
     assert_eq!(value["require_ok"], Value::Bool(true));
     assert_eq!(value["greet"], Value::from("hi"));
 
-    let cloned_init = expected_store.join("init.lua");
+    let cloned_init = expected_store.join("lua").join("my_repo").join("init.lua");
     assert!(cloned_init.is_file(), "cloned module missing init.lua");
 }
 
@@ -161,11 +163,13 @@ fn module_git_allows_rebinding_with_force() {
     );
 
     let init_lua_v1 = "return { greet = function() return \"v1\" end }\n";
-    std::fs::write(repo_dir.join("init.lua"), init_lua_v1).expect("write init.lua");
+    let lua_dir = repo_dir.join("lua").join("foo");
+    std::fs::create_dir_all(&lua_dir).expect("lua dir");
+    std::fs::write(lua_dir.join("init.lua"), init_lua_v1).expect("write init.lua");
 
     assert!(
         Command::new("git")
-            .args(["add", "init.lua"])
+            .args(["add", "lua/foo/init.lua"])
             .current_dir(&repo_dir)
             .status()
             .expect("git add")
@@ -198,11 +202,11 @@ fn module_git_allows_rebinding_with_force() {
     .to_string();
 
     let init_lua_v2 = "return { greet = function() return \"v2\" end }\n";
-    std::fs::write(repo_dir.join("init.lua"), init_lua_v2).expect("write init.lua v2");
+    std::fs::write(lua_dir.join("init.lua"), init_lua_v2).expect("write init.lua v2");
 
     assert!(
         Command::new("git")
-            .args(["add", "init.lua"])
+            .args(["add", "lua/foo/init.lua"])
             .current_dir(&repo_dir)
             .status()
             .expect("git add v2")

@@ -206,7 +206,7 @@ print("checked out into", r.path, "bytes", r.size)
 ### `ward.module` - external module manager
 
 `ward.module` downloads third-party Lua modules into Ward's data directory and
-exposes them via `require("externals.<name>")` for the lifetime of the
+exposes them via `require("<name>")` for the lifetime of the
 process. Downloads are content-addressed so multiple revisions can coexist and
 be reused across runs.
 
@@ -220,7 +220,7 @@ local module = require("ward.module")
   `~/.local/share/ward/externals` if `XDG_DATA_HOME` is unset).
 - Content-addressed store: `${base}/.store/<id>`, where `<id>` is
   `sha256(normalized_url + "\n" + selector)`.
-- A per-process binding map ensures `require("externals.<name>")` resolves to
+- A per-process binding map ensures `require("<name>")` resolves to
   the revision selected earlier in the same run. Rebinding to a different id is
   rejected unless `force=true`, in which case the next `require` reloads the
   module.
@@ -231,7 +231,7 @@ local module = require("ward.module")
   `.tar.gz`, `.tgz`, and query/fragment removed).
 - Names are canonicalized to lowercase with non-alphanumeric separators folded
   into `_`. Leading digits are prefixed with `_`.
-- `require("externals.<name>.<submodule>")` is supported; segments must be
+- `require("<name>.<submodule>")` is supported; segments must be
   alphanumeric or `_`.
 
 #### `module.dir() -> string`
@@ -248,7 +248,7 @@ Clone a Git repository into the externals store and bind it for `require`.
 
 Options (all optional):
 
-- `name` (string) - override derived name and `externals.<name>` binding.
+- `name` (string) - override derived name and `<name>` binding.
 - Exactly one of `rev`, `branch`, or `tag` selects a revision; default is
   `head`. Different selectors produce different store ids.
 - `force` (bool, default `false`) - allow rebinding an already-bound name to a
@@ -264,7 +264,7 @@ Return table:
 
 - `ok` (bool) - whether the checkout succeeded.
 - `name` (string) - canonicalized name.
-- `require` (string) - require target (`externals.<name>`).
+- `require` (string) - require target (`<name>`).
 - `path` / `store_path` (string) - final checkout directory.
 - `id` (string) - content-addressed id.
 
@@ -288,7 +288,7 @@ print(json.encode({ id = result.id, path = result.path, ok = result.ok }))
 
 #### `module.url(url, opts?) -> { ok, name, require, path, store_path, id }`
 
-Download a single Lua file and bind it as `externals.<name>`. The URL content is
+Download a single Lua file and bind it as `<name>`. The URL content is
 stored as `init.lua` inside its store directory.
 
 Options (all optional):

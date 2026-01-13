@@ -2,7 +2,8 @@
 
 `ward.module` is Ward's external Lua module manager. It downloads third-party
 Lua code into Ward's data directory and makes it available to the current
-process via `require("externals.<name>")`. Downloads are stored in a
+process by extending `package.path`, so you can `require("<name>.<submodule>")`
+(and other repo-local module names) directly. Downloads are stored in a
 content-addressed layout so multiple versions can coexist and be reused across runs.
 
 ## Import
@@ -23,10 +24,12 @@ The store id is derived from the normalized source URL and the selected
 revision (for git sources), so changing `tag`/`branch`/`rev` produces a
 different `<id>`.
 
-Ward maintains a per-process binding map so that once you bind `externals.<name>`
-to an id, future `require("externals.<name>")` calls in that same run resolve to
-the same revision. Rebinding is rejected unless you pass `force=true`, in which
-case Ward also clears the cached `require` entry so the next `require` reloads.
+Ward maintains a per-process binding map so that once you bind `<name>`
+to an id, future `require(...)` calls in that same run resolve consistently.
+The binding operation also injects the selected store root into `package.path`
+(idempotently), so standard Lua resolution works. Rebinding is rejected unless
+you pass `force=true`, in which case Ward also clears matching `package.loaded`
+entries and updates `package.path` to point at the new store root.
 
 ## Naming rules
 
@@ -42,7 +45,7 @@ If you don't specify a `name`, it is derived from the URL:
 Submodules are supported:
 
 ```lua
-require("externals.<name>.<submodule>")
+require("<name>.<submodule>")
 ```
 
 (Each segment must be alphanumeric or `_`.)
@@ -61,7 +64,7 @@ print(module.dir())
 ### module.git(url, opts?) -> { ok, name, require, path, store_path, id }
 
 Fetches a git repository, checks out a selected revision, and binds it as
-`externals.<name>` for this process.
+`<name>` for this process.
 
 **Arguments**
 
@@ -73,7 +76,7 @@ Fetches a git repository, checks out a selected revision, and binds it as
     - `branch` (string): branch name
     - `tag` (string): tag name
     - If none provided, defaults to "head"
-  - `force` (boolean, default `false`): allow rebinding `externals.<name>` to a
+  - `force` (boolean, default `false`): allow rebinding `<name>` to a
   different id (also clears cached `require`)
   - `depth` (integer): shallow clone depth
   - `recursive` (boolean): fetch submodules
@@ -85,7 +88,7 @@ Fetches a git repository, checks out a selected revision, and binds it as
 
 - `ok` (boolean): whether fetch/checkout succeeded
 - `name` (string): canonicalized name
-- `require` (string): require target (e.g. `externals.my_lib`)
+- `require` (string): require target (e.g. `my_lib`)
 - `path` / `store_path` (string): checkout directory path
 - `id` (string): content-addressed id for this URL+selector
 
@@ -110,7 +113,7 @@ print("loaded", result.require, "from", result.path, "id", result.id)
 
 ### module.url(url, opts?) -> { ok, name, require, path, store\_path, id }
 
-Downloads a single Lua file and binds it as `externals.<name>`. The downloaded
+Downloads a single Lua file and binds it as `<name>`. The downloaded
 content is stored as `init.lua` inside the store directory for its id.
 
 **Arguments**
@@ -122,7 +125,7 @@ content is stored as `init.lua` inside the store directory for its id.
   - `follow_redirects` (boolean, default `true`)
   - `retries` (integer, default `5`, minimum `1`)
   - `retry_delay` (integer, milliseconds, default `2000`)
-  - `force` (boolean, default `false`): allow rebinding `externals.<name>` to a
+  - `force` (boolean, default `false`): allow rebinding `<name>` to a
   new id
   - `timeout` (number, seconds): overall request timeout
   - `max_bytes` (integer): abort if download exceeds this size

@@ -1,7 +1,7 @@
 #![allow(clippy::unnecessary_wraps, clippy::too_many_lines)]
 
 use hex::ToHex;
-use mlua::{Lua, MultiValue, Table, Value};
+use mlua::{Lua, Table, Value};
 use rand::{RngCore, SeedableRng, rngs::SmallRng};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -85,10 +85,6 @@ fn canonicalize_name(name: &str) -> String {
         out.insert(0, '_');
     }
     out
-}
-
-fn is_safe_module_segment(s: &str) -> bool {
-    !s.is_empty() && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Default)]
@@ -218,7 +214,7 @@ fn module_result(lua: &Lua, name: &str, id: &str, path: &Path, ok: bool) -> mlua
     let t = lua.create_table()?;
     t.set("ok", ok)?;
     t.set("name", name.to_string())?;
-    t.set("require", format!("externals.{name}"))?;
+    t.set("require", name.to_string())?;
     t.set("path", path_to_string(path))?;
     t.set("store_path", path_to_string(path))?;
     t.set("id", id.to_string())?;
@@ -273,153 +269,120 @@ fn externals_binding_map(lua: &Lua) -> mlua::Result<Table> {
     Ok(t)
 }
 
-fn bind_external(lua: &Lua, name: &str, id: &str, force: bool) -> mlua::Result<()> {
-    let map = externals_binding_map(lua)?;
+fn normalize_lua_path(p: &str) -> String {
+    // Lua package.path patterns typically use forward slashes even on Windows.
+    p.replace('\\', "/")
+}
 
-    if let Some(existing) = map.get::<Option<String>>(name)? {
-        if existing == id {
-            return Ok(());
+fn externals_path_map(lua: &Lua) -> mlua::Result<Table> {
+    let globals = lua.globals();
+    if let Ok(t) = globals.get::<Table>("__ward_externals_path_map") {
+        return Ok(t);
+    }
+
+    let t = lua.create_table()?;
+    globals.set("__ward_externals_path_map", t.clone())?;
+    Ok(t)
+}
+
+fn external_package_patterns(root: &str) -> Vec<String> {
+    let r = normalize_lua_path(root).trim_end_matches('/').to_string();
+    vec![
+        format!("{r}/?.lua"),
+        format!("{r}/?/init.lua"),
+        format!("{r}/lua/?.lua"),
+        format!("{r}/lua/?/init.lua"),
+    ]
+}
+
+fn remove_from_package_path(package: &Table, patterns: &[String]) -> mlua::Result<()> {
+    let path: String = package.get("path")?;
+    let mut parts: Vec<String> = path
+        .split(';')
+        .filter(|p| !p.is_empty())
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    parts.retain(|p| !patterns.iter().any(|x| x == p));
+    package.set("path", parts.join(";"))?;
+    Ok(())
+}
+
+fn insert_into_package_path(package: &Table, patterns: &[String]) -> mlua::Result<()> {
+    let path: String = package.get("path")?;
+    let mut parts: Vec<String> = path
+        .split(';')
+        .filter(|p| !p.is_empty())
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    // Remove duplicates first (idempotent updates).
+    parts.retain(|p| !patterns.iter().any(|x| x == p));
+
+    // Insert after CWD patterns if present (Ward adds ./?.lua and ./?/init.lua early).
+    let mut insert_at: usize = 0;
+    for (i, p) in parts.iter().enumerate() {
+        if p == "./?.lua" || p == "./?/init.lua" {
+            insert_at = i + 1;
         }
+    }
+
+    for (idx, pat) in patterns.iter().enumerate() {
+        parts.insert(insert_at + idx, pat.clone());
+    }
+
+    package.set("path", parts.join(";"))?;
+    Ok(())
+}
+
+fn clear_loaded_for_external(lua: &Lua, name: &str) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+
+    let mut to_remove: Vec<String> = Vec::new();
+    let prefix = format!("{name}.");
+
+    for pair in loaded.pairs::<String, Value>() {
+        let (k, _) = pair?;
+        if k == name || k.starts_with(&prefix) {
+            to_remove.push(k);
+        }
+    }
+
+    for k in to_remove {
+        loaded.set(k, Value::Nil)?;
+    }
+    Ok(())
+}
+
+fn bind_external(lua: &Lua, name: &str, id: &str, store_path: &Path, force: bool) -> mlua::Result<()> {
+    let map = externals_binding_map(lua)?;
+    let path_map = externals_path_map(lua)?;
+
+    if let Some(existing) = map.get::<Option<String>>(name)?
+        && existing != id
+    {
         if !force {
             return Err(mlua::Error::external(format!(
                 "external '{name}' already bound to {existing}; set opts.force=true to rebind"
             )));
         }
+        clear_loaded_for_external(lua, name)?;
+    }
+
+    // Remove old store root patterns on rebind (or if a previous bind exists in this VM).
+    if let Some(old_root) = path_map.get::<Option<String>>(name)? {
+        let old_patterns = external_package_patterns(&old_root);
         let package: Table = lua.globals().get("package")?;
-        let loaded: Table = package.get("loaded")?;
-        loaded.set(format!("externals.{name}"), Value::Nil)?;
+        remove_from_package_path(&package, &old_patterns)?;
     }
 
-    map.set(name, id)?;
-    Ok(())
-}
-
-/// Installs a dedicated `package.searchers` entry for `externals.*`.
-///
-/// This makes `require("externals.<name>")` load from the content-addressed
-/// externals store with per-run bindings.
-/// # Errors [`mlua::Error`]
-pub fn install_externals_searcher(lua: &Lua) -> mlua::Result<()> {
-    // Idempotency marker.
-    if lua
-        .globals()
-        .get::<Option<bool>>("__ward_externals_searcher_installed")?
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
+    let root_s = path_to_string(store_path);
     let package: Table = lua.globals().get("package")?;
-    let searchers: Table = package.get("searchers")?;
+    insert_into_package_path(&package, &external_package_patterns(&root_s))?;
 
-    let _ = externals_binding_map(lua)?;
-    let store_dir = externals_store_dir();
-    let store_dir_s = path_to_string(&store_dir);
-
-    // Searcher signature: function(modname) -> loader, filepath OR error_message
-    let searcher = lua.create_function(move |lua, modname: String| -> mlua::Result<MultiValue> {
-        if !modname.starts_with("externals.") {
-            // Not our prefix: return nil to let other searchers continue.
-            return Ok(MultiValue::new());
-        }
-
-        let parts: Vec<&str> = modname.split('.').collect();
-        if parts.len() < 2 {
-            return Ok(MultiValue::from_vec(vec![Value::String(
-                lua.create_string("\n\tinvalid externals module name")?,
-            )]));
-        }
-        let root_name = parts.get(1).copied().unwrap_or_default();
-        if !is_safe_module_segment(root_name) {
-            return Ok(MultiValue::from_vec(vec![Value::String(
-                lua.create_string("\n\tinvalid externals module name")?,
-            )]));
-        }
-
-        // Validate submodule segments to prevent path traversal.
-        for seg in parts.iter().skip(2) {
-            if !is_safe_module_segment(seg) {
-                return Ok(MultiValue::from_vec(vec![Value::String(
-                    lua.create_string("\n\tinvalid externals module name")?,
-                )]));
-            }
-        }
-
-        let bindings: Table = lua
-            .globals()
-            .get("__ward_externals_map")
-            .map_err(|e| mlua::Error::external(format!("externals bindings unavailable: {e}")))?;
-        let Some(store_id) = bindings.get::<Option<String>>(root_name)? else {
-            return Ok(MultiValue::from_vec(vec![Value::String(lua.create_string(format!(
-                "\n\tno externals binding for '{root_name}' (call ward.module.git/url first)"
-            ))?)]));
-        };
-
-        // Build candidates.
-        let root = PathBuf::from(&store_dir_s).join(store_id);
-        if !root.exists() {
-            return Ok(MultiValue::from_vec(vec![Value::String(
-                lua.create_string(format!("\n\tno externals module '{modname}' in {store_dir_s}"))?,
-            )]));
-        }
-        let rel = if parts.len() > 2 {
-            parts[2..].join("/")
-        } else {
-            String::new()
-        };
-
-        let mut candidates: Vec<PathBuf> = Vec::new();
-
-        if rel.is_empty() {
-            candidates.push(root.join("init.lua"));
-            candidates.push(root.join(format!("{root_name}.lua")));
-            candidates.push(root.join("lua").join("init.lua"));
-            candidates.push(root.join("lua").join(format!("{root_name}.lua")));
-            candidates.push(root.join("lua").join(root_name).join("init.lua"));
-        } else {
-            candidates.push(root.join(format!("{rel}.lua")));
-            candidates.push(root.join(&rel).join("init.lua"));
-            candidates.push(root.join("lua").join(format!("{rel}.lua")));
-            candidates.push(root.join("lua").join(&rel).join("init.lua"));
-            candidates.push(root.join("lua").join(root_name).join(format!("{rel}.lua")));
-            candidates.push(root.join("lua").join(root_name).join(&rel).join("init.lua"));
-        }
-
-        for cand in candidates {
-            // Reject symlinks to avoid escaping the externals root.
-            let Ok(meta) = std::fs::symlink_metadata(&cand) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() || !meta.is_file() {
-                continue;
-            }
-
-            {
-                let content = std::fs::read_to_string(&cand)
-                    .map_err(|e| mlua::Error::external(format!("failed to read {}: {e}", path_to_string(&cand))))?;
-                let name = path_to_string(&cand);
-                let loader = lua.load(&content).set_name(&name).into_function()?;
-                let p = lua.create_string(&name)?;
-                return Ok(MultiValue::from_vec(vec![Value::Function(loader), Value::String(p)]));
-            }
-        }
-
-        Ok(MultiValue::from_vec(vec![Value::String(lua.create_string(format!(
-            "\n\tno externals module '{modname}' in {store_dir_s}"
-        ))?)]))
-    })?;
-
-    // Insert right after the preload searcher (position 2 in Lua 5.4).
-    let len = searchers.raw_len();
-    // Shift existing entries by 1 starting from the end.
-    for i in (2..=len).rev() {
-        let v: Value = searchers.get(i)?;
-        searchers.set(i + 1, v)?;
-    }
-    searchers.set(2, searcher)?;
-
-    lua.globals().set("__ward_externals_searcher_installed", true)?;
-
+    path_map.set(name, root_s)?;
+    map.set(name, id)?;
     Ok(())
 }
 
@@ -502,7 +465,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 }
             }
 
-            bind_external(&lua, &name, &id, opts.force)?;
+            bind_external(&lua, &name, &id, &target, opts.force)?;
             module_result(&lua, &name, &id, &target, true)
         })?,
     )?;
@@ -585,7 +548,7 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
                 }
             }
 
-            bind_external(&lua, &name, &id, opts.force)?;
+            bind_external(&lua, &name, &id, &target_dir, opts.force)?;
             module_result(&lua, &name, &id, &target_dir, true)
         })?,
     )?;

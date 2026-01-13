@@ -186,9 +186,6 @@ fn populate_modules(lua: &Lua, policy: &SandboxPolicy) -> mlua::Result<()> {
     }
     lua.register_module("ward", exposed_modules)?;
 
-    // Enable `require("externals.<name>")` by installing a dedicated searcher.
-    crate::lua::module::install_externals_searcher(lua)?;
-
     // Lua ergonomics: `require("foo")` should search the current working directory
     // by default, as stock Lua does (./?.lua;./?/init.lua).
     ensure_cwd_in_package_path(lua)?;
