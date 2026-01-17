@@ -8,6 +8,11 @@ include breaking changes.
 
 ---
 
+## v0.1.3
+
+- add ward.helper.string -> starts_with, ends_with functions
+- prevent loading C modules in sandbox
+
 ## v0.1.2
 
 - Remove custom `package` searcher
