@@ -210,16 +210,11 @@ assert(fs.touch("logs/app.log", { recursive = true }).ok)
 
 #### `fs.read(path, opts?) -> bytes string`
 
-Reads a file and returns a Lua string containing raw bytes.
+Reads a file and returns a Lua string or raw bytes.
 
 Options:
 
 - `mode` (`"text"|"binary"`, default `"text"`)
-
-Notes:
-
-- In `"text"` mode Ward validates UTF-8; the returned Lua string still
-contains the original bytes.
 
 ```lua
 local data = fs.read("README.md")

@@ -52,27 +52,15 @@ local text_path = path.new(nested):join("note.txt")
 local write_res = fs.write(text_path, "hello", { mode = "overwrite" })
 local append_res = fs.write(text_path, " world", { mode = "append" })
 local text_content = fs.read(text_path, { mode = "text" })
-if type(text_content) == "table" then
-  local chars = {}
-  for i = 1, #text_content do
-    chars[i] = string.char(text_content[i])
-  end
-  text_content = table.concat(chars)
-end
 
 local binary_path = path.new(root):join("bytes.bin")
 fs.write(binary_path, string.char(1, 2, 3, 4), { binary = true })
 local binary_read = fs.read(binary_path, { mode = "binary" })
 local binary_bytes = {}
-if type(binary_read) == "string" then
-  for i = 1, #binary_read do
-    binary_bytes[#binary_bytes + 1] = string.byte(binary_read, i)
-  end
-elseif type(binary_read) == "table" then
-  for i = 1, #binary_read do
+for i = 1, #binary_read do
     binary_bytes[#binary_bytes + 1] = binary_read[i]
-  end
 end
+
 local unlink_res = fs.unlink(binary_path, { force = true })
 local exists_after_unlink = fs.is_exists(binary_path)
 

@@ -329,13 +329,18 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // IMPORTANT: read returns Vec<u8> (binary-safe); for Text mode we validate UTF-8 but still return bytes.
     fs_table.set(
         "read",
-        lua.create_async_function(|_, (path, opts): (Value, Value)| async move {
-            let path = value_to_path_buf(path)?;
+        lua.create_async_function(|lua, (path, opts): (Value, Value)| async move {
+            let binding = value_to_path_buf(path)?;
+            let path = binding.as_path();
             let opts = ReadOpts::from_value(opts)?;
-            read_async(path.as_path(), opts).await
+            if opts.mode == ReadMode::Text {
+                let str = read_text_async(path).await.map_err(mlua::Error::external)?;
+                return Ok(Value::String(lua.create_string(&str)?));
+            }
+            let bytes = read_async(path).await.map_err(mlua::Error::external)?;
+            Ok(Value::Table(lua.create_sequence_from(bytes)?))
         })?,
     )?;
 
@@ -997,11 +1002,13 @@ async fn touch_async(path: &Path, options: TouchOpts) -> OpOutcome {
     }
 }
 
-async fn read_async(path: &Path, options: ReadOpts) -> mlua::Result<Vec<u8>> {
+async fn read_text_async(path: &Path) -> mlua::Result<String> {
+    let bytes = read_async(path).await?;
+    String::from_utf8(bytes).map_err(mlua::Error::external)
+}
+
+async fn read_async(path: &Path) -> mlua::Result<Vec<u8>> {
     let bytes = tokio::fs::read(path).await.map_err(mlua::Error::external)?;
-    if options.mode == ReadMode::Text {
-        std::str::from_utf8(&bytes).map_err(mlua::Error::external)?;
-    }
     Ok(bytes)
 }
 
