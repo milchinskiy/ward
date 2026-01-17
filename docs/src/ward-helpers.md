@@ -49,6 +49,8 @@ Functions:
 - `ltrim(s) -> string` - trim start.
 - `rtrim(s) -> string` - trim end.
 - `contains(s, substr) -> boolean` - substring test.
+- `starts_with(s, substr) -> boolean` - prefix test.
+- `ends_with(s, substr) -> boolean` - suffix test.
 - `replace(s, substr, repl) -> string` - replace first occurrence.
 - `replace_all(s, substr, repl) -> string` - replace all occurrences.
 - `split(s, sep) -> table` - splits into an array table.

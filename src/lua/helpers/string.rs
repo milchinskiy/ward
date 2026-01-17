@@ -13,6 +13,8 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     string.set("ltrim", lua.create_function(ltrim)?)?;
     string.set("rtrim", lua.create_function(rtrim)?)?;
     string.set("contains", lua.create_function(contains)?)?;
+    string.set("starts_with", lua.create_function(starts_with)?)?;
+    string.set("ends_with", lua.create_function(ends_with)?)?;
     string.set("replace", lua.create_function(replace)?)?;
     string.set("replace_all", lua.create_function(replace_all)?)?;
     string.set("split", lua.create_function(split)?)?;
@@ -47,6 +49,14 @@ fn rtrim(_: &Lua, s: String) -> mlua::Result<String> {
 
 fn contains(_: &Lua, (s, substr): (String, String)) -> mlua::Result<bool> {
     Ok(s.contains(&substr))
+}
+
+fn starts_with(_: &Lua, (s, substr): (String, String)) -> mlua::Result<bool> {
+    Ok(s.starts_with(&substr))
+}
+
+fn ends_with(_: &Lua, (s, substr): (String, String)) -> mlua::Result<bool> {
+    Ok(s.ends_with(&substr))
 }
 
 fn replace(_: &Lua, (s, substr, replacement): (String, String, String)) -> mlua::Result<String> {

@@ -63,6 +63,10 @@ print(json.encode({
   ltrim = s.ltrim("  Hello  "),
   rtrim = s.rtrim("  Hello  "),
   contains = s.contains("ward toolkit", "tool"),
+  starts_with = s.starts_with("ward toolkit", "ward"),
+  starts_with_neg = s.starts_with("ward toolkit", "tool"),
+  ends_with = s.ends_with("ward toolkit", "kit"),
+  ends_with_neg = s.ends_with("ward toolkit", "tool"),
   replace = s.replace("foo bar baz", "bar", "qux"),
   replace_all = s.replace_all("foo foo", "foo", "bar"),
   split = to_array(split_values),
@@ -87,6 +91,10 @@ print(json.encode({
     assert_eq!(value["ltrim"], Value::from("Hello  "));
     assert_eq!(value["rtrim"], Value::from("  Hello"));
     assert_eq!(value["contains"], Value::Bool(true));
+    assert_eq!(value["starts_with"], Value::Bool(true));
+    assert_eq!(value["starts_with_neg"], Value::Bool(false));
+    assert_eq!(value["ends_with"], Value::Bool(true));
+    assert_eq!(value["ends_with_neg"], Value::Bool(false));
     assert_eq!(value["replace"], Value::from("foo qux baz"));
     assert_eq!(value["replace_all"], Value::from("bar bar"));
     assert_eq!(value["split"], json!(["red", "green", "blue"]));
