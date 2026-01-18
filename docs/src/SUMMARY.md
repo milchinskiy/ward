@@ -8,24 +8,28 @@ functions, userdata types, and common patterns.
 
 ---
 
-- [ward.convert](ward-convert.md)
-- [ward.crypto](ward-crypto.md)
-- [ward.env](ward-env.md)
-- [ward.fs](ward-fs.md)
-- [ward.helpers](ward-helpers.md)
-- [ward.host](ward-host.md)
-- [ward.io](ward-io.md)
-- [ward.ipc.unix](ward-ipc.md)
-- [ward.lifecycle](ward-lifecycle.md)
-- [ward.log](ward-log.md)
-- [ward.module](ward-module.md)
-- [ward.net](ward-net.md)
-- [ward.process](ward-process.md)
-- [ward.template.minijinja](ward-template.md)
-- [ward.term](ward-term.md)
-- [ward.time](ward-time.md)
+# Modules
+
+- [convert](ward-convert.md)
+- [crypto](ward-crypto.md)
+- [env](ward-env.md)
+- [fs](ward-fs.md)
+- [helpers](ward-helpers.md)
+- [host](ward-host.md)
+- [io](ward-io.md)
+- [ipc.unix](ward-ipc.md)
+- [lifecycle](ward-lifecycle.md)
+- [log](ward-log.md)
+- [module](ward-module.md)
+- [net](ward-net.md)
+- [process](ward-process.md)
+- [template.minijinja](ward-template.md)
+- [term](ward-term.md)
+- [time](ward-time.md)
 
 ---
+
+# Misc
 
 - [Shell Examples](ward-shell-examples.md)
 - [LuaRocks Notes](luarocks-notes.md)

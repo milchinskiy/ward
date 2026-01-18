@@ -10,3 +10,4 @@ build-dir = "book"
 [output.html]
 git-repository-url = "https://github.com/milchinskiy/ward"
 additional-css = ["custom.css"]
+no-section-label = true
