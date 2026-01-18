@@ -8,6 +8,10 @@ include breaking changes.
 
 ---
 
+## v0.1.4
+
+- ward.fs.read in mode "text" returns string instead of bytes
+
 ## v0.1.3
 
 - add ward.helper.string -> starts_with, ends_with functions

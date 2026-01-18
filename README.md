@@ -63,7 +63,7 @@ or
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/milchinskiy/ward/master/install.sh \
-    | WARD_FLAVOR=musl WARD_VERSION=v0.1.3 INSTALL_DIR=~/.local/bin \
+    | WARD_FLAVOR=musl WARD_VERSION=v0.1.4 INSTALL_DIR=~/.local/bin \
     bash
 ```
 
