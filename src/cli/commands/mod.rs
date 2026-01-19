@@ -1,9 +1,15 @@
+pub mod eval;
+pub mod repl;
 pub mod run;
+
+mod common;
 
 use rust_args_parser as ap;
 
 #[derive(Default, Debug)]
 pub struct Context {
+    eval: eval::EvalContext,
+    repl: repl::ReplContext,
     run: run::RunContext,
 }
 
@@ -22,7 +28,11 @@ pub fn handle() {
         author,
     };
 
-    let root = ap::CmdSpec::new("ward").help("Ward CLI").subcmd(run::command());
+    let root = ap::CmdSpec::new("ward")
+        .help("Ward CLI")
+        .subcmd(run::command())
+        .subcmd(eval::command())
+        .subcmd(repl::command());
 
     match ap::parse(&env, &root, &args, &mut ctx) {
         Ok(_) => {}

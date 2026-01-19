@@ -10,15 +10,21 @@ pub mod sandbox;
 use sandbox::SandboxPolicy;
 
 const HOOK_STRIDE: u32 = 1024;
+pub const DEFAULT_THREAD_POOL_SIZE: usize = 2;
 
-/// Runs a lua file
-/// # Errors [`crate::Error`]
-pub async fn run_file(path: &Path, args: &[OsString], policy: SandboxPolicy) -> crate::Result {
+fn make_lua(policy: &SandboxPolicy) -> crate::Result<Lua> {
     let libs = StdLib::PACKAGE | StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
     let lua_options = LuaOptions::new().thread_pool_size(policy.thread_pool_size);
     let lua = Lua::new_with(libs, lua_options)?;
 
     lua.set_memory_limit(policy.memory_limit_bytes)?;
+    Ok(lua)
+}
+
+/// Runs a lua file
+/// # Errors [`crate::Error`]
+pub async fn run_file(path: &Path, args: &[OsString], policy: SandboxPolicy) -> crate::Result {
+    let lua = make_lua(&policy)?;
     // NOTE: the script is executed inside a Lua coroutine when using `exec_async()`,
     // therefore instruction hooks must be installed on the coroutine that executes the chunk.
     // Hook installation happens in `evaluate()`.
@@ -35,15 +41,174 @@ pub async fn run_file(path: &Path, args: &[OsString], policy: SandboxPolicy) -> 
     }
 
     let name = path.to_string_lossy().to_string();
-    evaluate(&lua, &lua_content, name.as_str(), args, &policy).await
+    evaluate_fresh(&lua, &lua_content, name.as_str(), args, &policy).await
 }
 
-async fn evaluate(lua: &Lua, content: &str, name: &str, args: &[OsString], policy: &SandboxPolicy) -> crate::Result {
+/// Evaluate a Lua chunk.
+///
+/// The provided args are exposed via `_G.arg` and forwarded as-is.
+/// # Errors [`crate::Error`]
+pub async fn eval(content: &str, args: &[OsString], policy: SandboxPolicy) -> crate::Result {
+    let lua = make_lua(&policy)?;
+    evaluate_fresh(&lua, content, "(eval)", args, &policy).await
+}
+
+/// Start an interactive REPL.
+///
+/// Exit conditions:
+/// - EOF on stdin
+/// - `exit`, `quit`, `:q`, or `:quit`
+/// - `process.exit(code)` from inside the session
+///
+/// # Errors [`crate::Error`]
+pub async fn repl(args: &[OsString], policy: SandboxPolicy, no_prompt: bool) -> crate::Result {
+    use std::io::IsTerminal;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let lua = make_lua(&policy)?;
+    prepare_lua(&lua, "(repl)", args, &policy)?;
+
+    let is_tty = std::io::stdin().is_terminal() && !no_prompt;
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+
+    if is_tty {
+        stdout
+            .write_all(b"Ward REPL. Type 'exit' or press Ctrl-D to quit.\n")
+            .await?;
+        stdout.flush().await?;
+    }
+
+    let mut buf = String::new();
+    let mut line = String::new();
+    loop {
+        if is_tty {
+            let prompt = if buf.is_empty() { "> " } else { ">> " };
+            stdout.write_all(prompt.as_bytes()).await?;
+            stdout.flush().await?;
+        }
+
+        line.clear();
+        let read_res = tokio::select! {
+            res = stdin.read_line(&mut line) => res,
+            _ = tokio::signal::ctrl_c() => {
+                return Err(crate::Error::Exit(130));
+            }
+        };
+
+        let n = read_res?;
+        if n == 0 {
+            // EOF
+            if buf.trim().is_empty() {
+                return Ok(());
+            }
+        }
+
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if buf.is_empty() {
+            let t = trimmed.trim();
+            if matches!(t, "exit" | "quit" | ":q" | ":quit") {
+                return Ok(());
+            }
+        }
+
+        if !trimmed.is_empty() {
+            buf.push_str(trimmed);
+            buf.push('\n');
+        } else if buf.is_empty() {
+            // Ignore empty lines at top-level.
+            if n == 0 {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let chunk = repl_rewrite_chunk(&buf);
+
+        match repl_chunk_complete(&lua, &chunk) {
+            Ok(true) => match execute_prepared(&lua, &chunk, "(repl)", &policy).await {
+                Ok(()) => {
+                    buf.clear();
+                }
+                Err(crate::Error::Exit(code)) => return Err(crate::Error::Exit(code)),
+                Err(e) => {
+                    eprintln!("{e}");
+                    buf.clear();
+                }
+            },
+            Ok(false) => {
+                // Need more input (multi-line chunk).
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                buf.clear();
+            }
+        }
+
+        if n == 0 {
+            // EOF after executing buffered chunk.
+            return Ok(());
+        }
+    }
+}
+
+fn repl_rewrite_chunk(buf: &str) -> String {
+    // Only support `=expr` shorthand for a single-line input.
+    let mut lines = buf.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    if lines.next().is_some() {
+        return buf.to_string();
+    }
+
+    let trimmed = first.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('=') {
+        let expr = rest.trim_start();
+        return format!("print({expr})\n");
+    }
+
+    buf.to_string()
+}
+
+fn repl_chunk_complete(lua: &Lua, content: &str) -> mlua::Result<bool> {
+    let env = lua.globals();
+    match lua
+        .load(content)
+        .set_name("(repl)")
+        .set_mode(ChunkMode::Text)
+        .set_environment(env)
+        .into_function()
+    {
+        Ok(_) => Ok(true),
+        Err(mlua::Error::SyntaxError {
+            incomplete_input: true, ..
+        }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn prepare_lua(lua: &Lua, script_name: &str, args: &[OsString], policy: &SandboxPolicy) -> crate::Result<()> {
     lua.set_app_data(policy.clone());
     populate_modules(lua, policy)?;
-
     let env = lua.globals();
-    populate_env(lua, &env, name, args)?;
+    populate_env(lua, &env, script_name, args)?;
+    Ok(())
+}
+
+async fn evaluate_fresh(
+    lua: &Lua,
+    content: &str,
+    name: &str,
+    args: &[OsString],
+    policy: &SandboxPolicy,
+) -> crate::Result {
+    prepare_lua(lua, name, args, policy)?;
+    execute_prepared(lua, content, name, policy).await
+}
+
+async fn execute_prepared(lua: &Lua, content: &str, name: &str, policy: &SandboxPolicy) -> crate::Result {
+    let env = lua.globals();
 
     // Approximate instruction limiting: the VM hook runs every HOOK_STRIDE instructions (or less),
     // so the script may exceed the configured limit by up to (hook_stride - 1) instructions.
