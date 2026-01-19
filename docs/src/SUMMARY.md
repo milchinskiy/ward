@@ -5,6 +5,7 @@ functions, userdata types, and common patterns.
 
 - [About](about.md)
 - [Conventions](conventions.md)
+- [CLI](cli.md)
 
 ---
 

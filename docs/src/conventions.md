@@ -10,10 +10,10 @@ ward.fs.path objects).
 
 ---
 
-## CLI sandbox limits (`ward run`)
+## CLI sandbox limits (`ward run`, `ward eval`, `ward repl`)
 
-`ward run` executes a Lua file under a configurable sandbox. The most commonly
-used switches are:
+Ward commands that execute Lua (`ward run`, `ward eval`, `ward repl`) support a
+configurable sandbox. The most commonly used switches are:
 
 - `--memory-limit BYTES` - maximum Lua memory usage
 - `--instruction-limit N` - approximate instruction budget (see notes below)

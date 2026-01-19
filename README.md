@@ -115,11 +115,15 @@ chmod +x ./script.lua
 
 ## CLI reference
 
-Currently the main command is:
+Ward provides the following Lua-executing commands:
 
-```sh
-ward run [OPTIONS] FILE [--] [ARGS...]
+```text
+ward run  [OPTIONS] FILE [--] [ARGS...]
+ward eval [OPTIONS] [-e|--expr LUA] [--] [ARGS...]
+ward repl [OPTIONS] [--] [ARGS...]
 ```
+
+See `docs/src/cli.md` for a comprehensive reference and usage examples.
 
 Options:
 
@@ -127,6 +131,11 @@ Options:
 - `-i, --instruction-limit <n>`: approximate instruction cap (enforced via VM hook)
 - `-t, --threads <n>`: worker thread count
 - `-T, --timeout <duration>`: timeout (`500ms`, `2s`, `1m`, or plain seconds)
+
+Command-specific options:
+
+- `ward eval`: `-e, --expr <lua>` or read from stdin (see also `--no-stdin`)
+- `ward repl`: `--no-prompt` disables prompts and banner
 
 Logging:
 
