@@ -4,6 +4,7 @@ use hex::ToHex;
 use mlua::{Lua, Table, Value};
 use rand::{RngCore, SeedableRng, rngs::SmallRng};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -386,6 +387,30 @@ fn bind_external(lua: &Lua, name: &str, id: &str, store_path: &Path, force: bool
     Ok(())
 }
 
+fn run_install_async<T, F>(fut: F) -> mlua::Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = mlua::Result<T>> + Send + 'static,
+{
+    // Always run module install work on a dedicated thread with its own Tokio runtime.
+    //
+    // Rationale:
+    // - `ward.module.git/url()` must not yield in Lua (must be safe under `require(...)`).
+    // - Blocking inside an existing Tokio runtime is fragile: `block_in_place` panics on
+    //   current-thread runtimes (used by some tests) and `Handle::block_on` can deadlock.
+    //
+    // Overhead is acceptable because module install is inherently heavyweight (network + disk).
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(mlua::Error::external)?;
+        rt.block_on(fut)
+    })
+    .join()
+    .map_err(|_| mlua::Error::external("module install thread panicked"))?
+}
+
 /// Initializes the `module` module.
 /// # Errors [`mlua::Error`]
 pub fn define(lua: &Lua) -> mlua::Result<Table> {
@@ -394,162 +419,146 @@ pub fn define(lua: &Lua) -> mlua::Result<Table> {
     m.set("dir", lua.create_function(|_, ()| Ok(path_to_string(&externals_dir())))?)?;
 
     // module.git(url, opts?) -> { ok, name, require, path, store_path, id }
+    //
+    // NOTE: This function is intentionally synchronous from Lua's perspective.
+    // Many users call it during `require(...)` (module initialization), and yielding
+    // inside Lua's built-in `require` triggers `attempt to yield across a C-call boundary`.
+    // We therefore run the async install pipeline to completion via a blocking bridge.
     m.set(
         "git",
-        lua.create_async_function(|lua, (url, opts): (String, Value)| async move {
-            let opts = GitOpts::from_value(opts)?;
+        lua.create_function(|lua, (url, opts_v): (String, Value)| {
+            let opts = GitOpts::from_value(opts_v)?;
             let raw_name = opts.name.clone().unwrap_or_else(|| derive_name_from_url(&url));
             let name = canonicalize_name(&raw_name);
             let selector = selector_from_git_opts(&opts)?;
             let id = store_id(&url, &selector);
             let target = store_path_for_id(&id);
 
-            tokio::fs::create_dir_all(externals_store_dir())
-                .await
-                .map_err(mlua::Error::external)?;
-            tokio::fs::create_dir_all(externals_tmp_dir())
-                .await
-                .map_err(mlua::Error::external)?;
+            std::fs::create_dir_all(externals_store_dir()).map_err(mlua::Error::external)?;
+            std::fs::create_dir_all(externals_tmp_dir()).map_err(mlua::Error::external)?;
 
-            if !target.exists() {
+            let ok = if target.exists() {
+                true
+            } else {
                 let tmp_dir = random_tmp_dir();
-                let tmp_parent = tmp_dir.parent().map_or_else(externals_tmp_dir, Path::to_path_buf);
-                tokio::fs::create_dir_all(tmp_parent)
-                    .await
-                    .map_err(mlua::Error::external)?;
+                let tmp_parent = tmp_dir
+                    .parent()
+                    .map_or_else(externals_tmp_dir, std::path::Path::to_path_buf);
+                std::fs::create_dir_all(&tmp_parent).map_err(mlua::Error::external)?;
 
-                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                let overlay = crate::lua::env::overlay_snapshot(lua)?;
 
-                // Reuse ward.net.fetch.git engine.
-                let t = lua.create_table()?;
-                t.set("into", path_to_string(&tmp_dir))?;
-                if let Some(v) = opts.rev {
-                    t.set("rev", v)?;
-                }
-                if let Some(v) = opts.branch {
-                    t.set("branch", v)?;
-                }
-                if let Some(v) = opts.tag {
-                    t.set("tag", v)?;
-                }
-                if let Some(v) = opts.depth {
-                    t.set("depth", v)?;
-                }
-                if let Some(v) = opts.recursive {
-                    t.set("recursive", v)?;
-                }
-                if let Some(v) = opts.max_bytes {
-                    t.set("max_bytes", v)?;
-                }
-                if let Some(v) = opts.filter_blobs {
-                    t.set("filter_blobs", v)?;
-                }
-                if let Some(v) = opts.timeout {
-                    t.set("timeout", v.as_secs_f64())?;
-                }
+                let fopts = crate::lua::net::fetch::GitOptions {
+                    into: Some(tmp_dir.clone()),
+                    rev: opts.rev.clone(),
+                    branch: opts.branch.clone(),
+                    tag: opts.tag.clone(),
+                    depth: opts.depth,
+                    recursive: opts.recursive.unwrap_or(false),
+                    timeout: opts.timeout,
+                    max_bytes: opts.max_bytes,
+                    filter_blobs: opts.filter_blobs.unwrap_or(true),
+                };
 
-                let resp = crate::lua::net::fetch::fetch_git_async(&url, Value::Table(t), overlay).await?;
-                if !resp.ok {
-                    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                    return module_result(&lua, &name, &id, &target, false);
-                }
+                let target2 = target.clone();
 
-                let rename_result = tokio::fs::rename(&tmp_dir, &target).await;
-                if let Err(e) = rename_result {
-                    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                    if target.exists() {
-                        // Another process installed it first; treat as success.
-                    } else {
-                        return Err(mlua::Error::external(format!("failed to finalize git checkout: {e}")));
+                run_install_async(async move {
+                    let resp = crate::lua::net::fetch::fetch_git_with_options_async(&url, fopts, overlay).await?;
+                    if !resp.ok {
+                        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                        return Ok(false);
                     }
-                }
-            }
 
-            bind_external(&lua, &name, &id, &target, opts.force)?;
-            module_result(&lua, &name, &id, &target, true)
+                    let rename_result = tokio::fs::rename(&tmp_dir, &target2).await;
+                    if let Err(e) = rename_result {
+                        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                        if !target2.exists() {
+                            return Err(mlua::Error::external(format!("failed to finalize git checkout: {e}")));
+                        }
+                    }
+
+                    Ok(true)
+                })?
+            };
+
+            if ok {
+                bind_external(lua, &name, &id, &target, opts.force)?;
+            }
+            module_result(lua, &name, &id, &target, ok)
         })?,
     )?;
 
     // module.url(url, opts?) -> { ok, name, require, path, store_path, id }
+    //
+    // NOTE: Synchronous (see module.git note above).
     m.set(
         "url",
-        lua.create_async_function(|lua, (url, opts): (String, Value)| async move {
-            let opts = UrlOpts::from_value(opts)?;
+        lua.create_function(|lua, (url, opts_v): (String, Value)| {
+            let opts = UrlOpts::from_value(opts_v)?;
             let raw_name = opts.name.clone().unwrap_or_else(|| derive_name_from_url(&url));
             let name = canonicalize_name(&raw_name);
             let id = store_id(&url, "url");
             let target_dir = store_path_for_id(&id);
 
-            tokio::fs::create_dir_all(externals_store_dir())
-                .await
-                .map_err(mlua::Error::external)?;
-            tokio::fs::create_dir_all(externals_tmp_dir())
-                .await
-                .map_err(mlua::Error::external)?;
+            std::fs::create_dir_all(externals_store_dir()).map_err(mlua::Error::external)?;
+            std::fs::create_dir_all(externals_tmp_dir()).map_err(mlua::Error::external)?;
 
-            if !target_dir.exists() {
+            let ok = if target_dir.exists() {
+                true
+            } else {
                 let tmp_dir = random_tmp_dir();
-                tokio::fs::create_dir_all(&tmp_dir)
-                    .await
-                    .map_err(mlua::Error::external)?;
-
+                std::fs::create_dir_all(&tmp_dir).map_err(mlua::Error::external)?;
                 let tmp_file = tmp_dir.join("init.lua");
 
-                // Prepare options for ward.net.fetch.url.
-                let t = lua.create_table()?;
-                t.set("into", path_to_string(&tmp_file))?;
-                t.set("follow_redirects", opts.follow_redirects)?;
-                t.set("insecure", opts.insecure)?;
-                if let Some(v) = opts.max_bytes {
-                    t.set("max_bytes", v)?;
-                }
-                if let Some(v) = opts.timeout {
-                    t.set("timeout", v.as_secs_f64())?;
-                }
-                if let Some(v) = opts.method {
-                    t.set("method", v)?;
-                }
-                if !opts.headers.is_empty() {
-                    let map = lua.create_table()?;
-                    for (k, v) in &opts.headers {
-                        map.set(k.clone(), v.clone())?;
+                let fopts = crate::lua::net::fetch::UrlOptions {
+                    into: Some(tmp_file.clone()),
+                    follow_redirects: opts.follow_redirects,
+                    insecure: opts.insecure,
+                    timeout: opts.timeout,
+                    max_bytes: opts.max_bytes,
+                    method: opts.method.clone().unwrap_or_else(|| "GET".to_string()),
+                    headers: opts.headers.clone(),
+                };
+
+                let target2 = target_dir.clone();
+                let retries = opts.retries;
+                let retry_delay_ms = opts.retry_delay_ms;
+
+                run_install_async(async move {
+                    let mut attempt: u32 = 1;
+                    loop {
+                        let resp = crate::lua::net::fetch::fetch_url_with_options_async(&url, fopts.clone()).await?;
+                        if resp.ok {
+                            break;
+                        }
+
+                        let _ = tokio::fs::remove_file(&tmp_file).await;
+                        if attempt >= retries {
+                            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                            return Ok(false);
+                        }
+                        attempt += 1;
+                        if retry_delay_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                        }
                     }
-                    t.set("headers", map)?;
-                }
 
-                let mut attempt: u32 = 1;
-                loop {
-                    let resp = crate::lua::net::fetch::fetch_url_async(&url, Value::Table(t.clone())).await?;
-                    if resp.ok {
-                        break;
-                    }
-
-                    // Best-effort cleanup of a partial/failed download.
-                    let _ = tokio::fs::remove_file(&tmp_file).await;
-
-                    if attempt >= opts.retries {
+                    let rename_result = tokio::fs::rename(&tmp_dir, &target2).await;
+                    if let Err(e) = rename_result {
                         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                        return module_result(&lua, &name, &id, &target_dir, false);
+                        if !target2.exists() {
+                            return Err(mlua::Error::external(format!("failed to finalize url download: {e}")));
+                        }
                     }
-                    attempt += 1;
-                    if opts.retry_delay_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(opts.retry_delay_ms)).await;
-                    }
-                }
 
-                let rename_result = tokio::fs::rename(&tmp_dir, &target_dir).await;
-                if let Err(e) = rename_result {
-                    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                    if target_dir.exists() {
-                        // Another process completed first.
-                    } else {
-                        return Err(mlua::Error::external(format!("failed to finalize url download: {e}")));
-                    }
-                }
+                    Ok(true)
+                })?
+            };
+
+            if ok {
+                bind_external(lua, &name, &id, &target_dir, opts.force)?;
             }
-
-            bind_external(&lua, &name, &id, &target_dir, opts.force)?;
-            module_result(&lua, &name, &id, &target_dir, true)
+            module_result(lua, &name, &id, &target_dir, ok)
         })?,
     )?;
 

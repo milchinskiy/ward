@@ -62,7 +62,7 @@ impl UserData for FetchResponse {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct UrlOptions {
     pub method: String,
     pub headers: Vec<(String, String)>,
@@ -127,7 +127,7 @@ impl UrlOptions {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GitOptions {
     pub depth: Option<u32>,
     pub rev: Option<String>,
@@ -196,11 +196,9 @@ impl GitOptions {
     }
 }
 
-/// Fetches a url
+/// Fetches a url using pre-parsed options
 /// # Errors [`mlua::Error`]
-pub(crate) async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> {
-    let options = UrlOptions::from_value(opts)?;
-
+pub(crate) async fn fetch_url_with_options_async(url: &str, options: UrlOptions) -> mlua::Result<FetchResponse> {
     let mut client_builder = reqwest::Client::builder();
     if let Some(timeout) = options.timeout {
         client_builder = client_builder.timeout(timeout);
@@ -280,15 +278,18 @@ pub(crate) async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<Fetc
     Ok(response)
 }
 
-/// Fetches a git repo
-/// # Errors [`mlua::Error`]
-pub(crate) async fn fetch_git_async(
-    url: &str,
-    opts: Value,
-    overlay: HashMap<String, Option<String>, std::hash::RandomState>,
-) -> mlua::Result<FetchResponse> {
-    let options = GitOptions::from_value(opts)?;
+pub(crate) async fn fetch_url_async(url: &str, opts: Value) -> mlua::Result<FetchResponse> {
+    let options = UrlOptions::from_value(opts)?;
+    fetch_url_with_options_async(url, options).await
+}
 
+/// Fetches a git repo using pre-parsed options
+/// # Errors [`mlua::Error`]
+pub(crate) async fn fetch_git_with_options_async(
+    url: &str,
+    options: GitOptions,
+    overlay: std::collections::HashMap<String, Option<String>, std::hash::RandomState>,
+) -> mlua::Result<FetchResponse> {
     // Defensive: prevent arg-style injection into git by rejecting values that look like options.
     // (E.g. a URL that begins with '-' could be treated as a flag by git.)
     if url.starts_with('-') {
@@ -385,7 +386,16 @@ pub(crate) async fn fetch_git_async(
     Ok(response)
 }
 
-#[derive(Default)]
+pub(crate) async fn fetch_git_async(
+    url: &str,
+    opts: Value,
+    overlay: HashMap<String, Option<String>, std::hash::RandomState>,
+) -> mlua::Result<FetchResponse> {
+    let options = GitOptions::from_value(opts)?;
+    fetch_git_with_options_async(url, options, overlay).await
+}
+
+#[derive(Default, Clone)]
 struct CommandResult {
     status: i32,
     ok: bool,
