@@ -11,6 +11,7 @@ functions, userdata types, and common patterns.
 
 # Modules
 
+- [async](ward-async.md)
 - [convert](ward-convert.md)
 - [crypto](ward-crypto.md)
 - [env](ward-env.md)
