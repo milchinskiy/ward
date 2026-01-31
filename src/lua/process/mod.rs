@@ -908,6 +908,17 @@ impl UserData for Cmd {
             }
         });
 
+        // cmd:disown(opts?) -> table
+        methods.add_async_method("disown", |lua, this, opts: Option<Table>| {
+            let spec = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                let cfg = SpawnCfg::from_lua_disown(opts.as_ref())?;
+                let defaults = shell_defaults_snapshot();
+                disown_specs(lua.clone(), vec![spec], defaults.pipefail, defaults.timeout_ms, cfg, overlay).await
+            }
+        });
+
         methods.add_meta_method(MetaMethod::BOr, |_, this, rhs: Value| pipe_value(this.snapshot(), rhs));
 
         methods.add_meta_method(MetaMethod::ToString, |_, _this, ()| Ok("Cmd()".to_string()));
@@ -999,6 +1010,15 @@ impl UserData for Pipeline {
                 let overlay = crate::lua::env::overlay_snapshot(&lua)?;
                 let cfg = SpawnCfg::from_lua(opts.as_ref(), &specs.last().cloned().unwrap_or_else(CmdSpec::default))?;
                 spawn_specs(lua.clone(), specs, pipefail, timeout_ms, cfg, overlay).await
+            }
+        });
+
+        methods.add_async_method("disown", |lua, this, opts: Option<Table>| {
+            let (specs, pipefail, timeout_ms) = this.snapshot();
+            async move {
+                let overlay = crate::lua::env::overlay_snapshot(&lua)?;
+                let cfg = SpawnCfg::from_lua_disown(opts.as_ref())?;
+                disown_specs(lua.clone(), specs, pipefail, timeout_ms, cfg, overlay).await
             }
         });
 
@@ -1354,6 +1374,24 @@ impl SpawnCfg {
         cfg.stderr = parse_stdio_mode(t.get::<Option<Value>>("stderr")?, cfg.stderr)?;
         Ok(cfg)
     }
+
+    fn from_lua_disown(opts: Option<&Table>) -> LuaResult<Self> {
+        // Disowned processes should not keep any piped stdio by default, otherwise the child can
+        // block if buffers fill and nobody drains them.
+        let mut cfg = Self {
+            stdin: StdioMode::Null,
+            stdout: StdioMode::Null,
+            stderr: StdioMode::Null,
+        };
+
+        let Some(t) = opts else {
+            return Ok(cfg);
+        };
+        cfg.stdin = parse_stdio_mode(t.get::<Option<Value>>("stdin")?, cfg.stdin)?;
+        cfg.stdout = parse_stdio_mode(t.get::<Option<Value>>("stdout")?, cfg.stdout)?;
+        cfg.stderr = parse_stdio_mode(t.get::<Option<Value>>("stderr")?, cfg.stderr)?;
+        Ok(cfg)
+    }
 }
 
 fn parse_stdio_mode(v: Option<Value>, default: StdioMode) -> LuaResult<StdioMode> {
@@ -1453,7 +1491,7 @@ async fn run_specs(
         }
     };
 
-    let core = spawn_specs_core(specs.clone(), pipefail, timeout_override, cfg, overlay).await?;
+    let core = spawn_specs_core(specs.clone(), pipefail, timeout_override, cfg, overlay, true).await?;
     let SpawnedCore {
         timeout_ms,
         mut children,
@@ -1557,7 +1595,7 @@ async fn spawn_specs(
     for spec in &mut specs {
         apply_process_middlewares(&lua, spec)?;
     }
-    let core = spawn_specs_core(specs, pipefail, timeout_ms, cfg, overlay).await?;
+    let core = spawn_specs_core(specs, pipefail, timeout_ms, cfg, overlay, true).await?;
     let pids_snapshot = Arc::new(core.pids.clone());
     Ok(ProcChild {
         inner: Arc::new(AsyncMutex::new(ProcState {
@@ -1580,6 +1618,111 @@ async fn spawn_specs(
     })
 }
 
+async fn disown_specs(
+    lua: Lua,
+    mut specs: Vec<CmdSpec>,
+    pipefail: bool,
+    timeout_ms: Option<u64>,
+    cfg: SpawnCfg,
+    overlay: EnvOverlay,
+) -> LuaResult<Table> {
+    if specs.is_empty() {
+        return Err(mlua::Error::RuntimeError("empty pipeline".into()));
+    }
+
+    if cfg.stdin == StdioMode::Pipe {
+        return Err(mlua::Error::RuntimeError(
+            "disown(): stdin='pipe' is not supported (use spawn() for interactive processes)".into(),
+        ));
+    }
+
+    for spec in &mut specs {
+        apply_process_middlewares(&lua, spec)?;
+    }
+
+    let core = spawn_specs_core(specs, pipefail, timeout_ms, cfg, overlay, false).await?;
+    let pids = core.pids.clone();
+
+    // Reap children in the background to avoid zombies; drain any piped outputs to avoid blocking.
+    tokio::spawn(async move {
+        let timeout_ms = core.timeout_ms;
+        let mut children = core.children;
+
+        // Link/pump tasks are needed for pipelines; keep them alive until the pipeline exits.
+        let link_tasks = core.link_tasks;
+        let stdin_task = core.stdin_task;
+        let aux_tasks = core.aux_tasks;
+
+        // If outputs were piped, drain them so the child can't block on a full buffer.
+        let mut drain_tasks: Vec<JoinHandle<()>> = Vec::new();
+        if let Some(out) = core.stdout {
+            drain_tasks.push(tokio::spawn(async move {
+                let mut r = out;
+                let mut buf = [0_u8; 16 * 1024];
+                loop {
+                    match r.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }));
+        }
+        if let Some(err) = core.stderr {
+            drain_tasks.push(tokio::spawn(async move {
+                let mut r = err;
+                let mut buf = [0_u8; 16 * 1024];
+                loop {
+                    match r.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }));
+        }
+
+        let wait_all = async {
+            for ch in &mut children {
+                let _ = ch.wait().await;
+            }
+        };
+
+        if let Some(ms) = timeout_ms.filter(|v| *v > 0) {
+            if time::timeout(Duration::from_millis(ms), wait_all).await.is_err() {
+                for ch in &mut children {
+                    let _ = ch.kill().await;
+                }
+                for ch in &mut children {
+                    let _ = ch.wait().await;
+                }
+            }
+        } else {
+            wait_all.await;
+        }
+
+        for t in link_tasks {
+            t.abort();
+        }
+        if let Some(t) = stdin_task {
+            t.abort();
+        }
+        for t in aux_tasks {
+            t.abort();
+        }
+        for t in drain_tasks {
+            t.abort();
+        }
+    });
+
+    let res = lua.create_table()?;
+    res.set("pid", pids.last().copied().unwrap_or(0))?;
+    let t = lua.create_table()?;
+    for (i, pid) in pids.iter().enumerate() {
+        t.set(i + 1, *pid)?;
+    }
+    res.set("pids", t)?;
+    Ok(res)
+}
+
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 async fn spawn_specs_core(
     mut specs: Vec<CmdSpec>,
@@ -1587,6 +1730,7 @@ async fn spawn_specs_core(
     timeout_override: Option<u64>,
     cfg: SpawnCfg,
     overlay: EnvOverlay,
+    kill_on_drop: bool,
 ) -> LuaResult<SpawnedCore> {
     if specs.is_empty() {
         return Err(mlua::Error::RuntimeError("empty pipeline".into()));
@@ -1620,7 +1764,7 @@ async fn spawn_specs_core(
 
     for (i, spec) in specs.iter_mut().enumerate() {
         let mut c = Command::new(&spec.program);
-        c.kill_on_drop(true);
+        c.kill_on_drop(kill_on_drop);
         c.args(&spec.args);
         apply_env_overlay(&mut c, &overlay);
         apply_common_opts(&mut c, spec);

@@ -5,6 +5,7 @@
 - [`CmdResult` userdata (result of run/output)](#cmdresult-userdata-result-of-runoutput)
 - [`Cmd` userdata](#cmd-userdata)
   - [`Cmd:spawn(opts?) -> ProcChild`](#cmdspawnopts---procchild)
+  - [`Cmd:disown(opts?) -> table`](#cmddisownopts---table)
   - [`ProcChild` userdata](#procchild-userdata)
   - [`ProcStdin` userdata (interactive stdin)](#procstdin-userdata-interactive-stdin)
   - [`LineStream` userdata (line-by-line streaming)](#linestream-userdata-line-by-line-streaming)
@@ -184,6 +185,7 @@ Builder methods (fluent):
 - `cmd:stdin_null() -> Cmd`
 - `cmd:stderr_to_stdout(true|false) -> Cmd`
 - `cmd:spawn(opts?) -> ProcChild`
+- `cmd:disown(opts?) -> table`
 
 Notes:
 
@@ -280,6 +282,49 @@ while true do
 end
 
 child:wait()
+```
+
+### `Cmd:disown(opts?) -> table`
+
+Spawn a process and **do not wait for it**.
+
+This is the equivalent of `cmd & disown` in a shell:
+
+- Ward starts the process and immediately returns.
+- Ward does **not** keep a `ProcChild` handle alive.
+- Ward reaps the process in the background (best-effort) to avoid zombies.
+
+Return value:
+
+```lua
+{ pid = <integer>, pids = { <integer>, ... } }
+```
+
+`opts` is the same shape as `spawn(opts?)` (stdio modes), but with different
+defaults:
+
+- `stdin` default: `"null"`
+- `stdout` default: `"null"`
+- `stderr` default: `"null"`
+
+Notes:
+
+- `stdin = "pipe"` / `true` is **not supported** for `disown()` (use `spawn()`
+for interactive processes).
+- If you explicitly set `stdout = "pipe"` or `stderr = "pipe"`, Ward will drain
+those pipes in the background so the child cannot block on a full buffer.
+
+Example (start a GUI app and continue immediately):
+
+```lua
+local p = require("ward.process")
+
+-- Start and forget.
+local info = p.cmd("firefox"):disown()
+print("started pid", info.pid)
+
+-- Continue doing other work...
+p.cmd("sh", "-lc", "echo still running"):run()
 ```
 
 ### `ProcChild` userdata
@@ -428,10 +473,15 @@ Terminal operations:
 - `pl:run() -> CmdResult`
 - `pl:output() -> CmdResult`
 - `pl:spawn(opts?) -> ProcChild`
+- `pl:disown(opts?) -> table`
 
 `pl:spawn(opts?)` starts the pipeline and returns a `ProcChild` for streaming.
 The returned child refers to the **last stage** in the pipeline; use
 `child:pids()` to get all stage PIDs.
+
+`pl:disown(opts?)` starts the pipeline and returns the same `{ pid, pids }`
+table as `Cmd:disown(opts?)`. It is useful for fire-and-forget pipelines
+where you do not need streaming or interaction.
 
 Operator:
 

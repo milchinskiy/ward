@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn ward_cmd() -> Command {
@@ -29,6 +30,57 @@ fn run_lua_script(name: &str, body: &str) -> Value {
     );
 
     serde_json::from_slice(&output.stdout).expect("stdout json")
+}
+
+#[test]
+fn process_disown_returns_immediately_and_does_not_kill_child() {
+    let temp = tempdir().expect("tempdir");
+    let out_path = temp.path().join("disown_out.txt");
+    let script_path = temp.path().join("disown.lua");
+
+    // Quote for sh: '...'
+    let out_sh = out_path.to_string_lossy().replace('\'', "'\\''");
+    let body = format!(
+        r#"local process = require("ward.process")
+local json = require("ward.convert.json")
+
+-- Spawn a slow writer, then exit immediately.
+local info = process.cmd("sh", {{"-c", "sleep 0.2; printf 'done' > '{out_sh}'"}}):disown()
+
+print(json.encode({{ pid = info.pid }}))
+"#
+    );
+
+    std::fs::write(&script_path, body).expect("write script");
+
+    let start = Instant::now();
+    let output = ward_cmd()
+        .args(["run", script_path.to_string_lossy().as_ref()])
+        .output()
+        .expect("run output");
+    let elapsed = start.elapsed();
+
+    assert!(
+        output.status.success(),
+        "lua script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "disown() appears to have blocked (elapsed: {elapsed:?})"
+    );
+
+    // The background child should still run after ward exits.
+    for _ in 0..80 {
+        if out_path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let out = std::fs::read_to_string(&out_path).expect("child output missing (disowned process likely killed)");
+    assert_eq!(out, "done");
 }
 
 #[test]

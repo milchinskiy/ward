@@ -8,6 +8,15 @@ include breaking changes.
 
 ---
 
+## v0.2.2
+
+- add `ward.process` -> `Cmd:disown()` / `Pipeline:disown()`
+- update docs
+
+## v0.2.1
+
+- make `ward.module` sync (lua) to prevent 'attemp to yield across a C-call boundary'
+
 ## v0.2.0
 
 - Add `ward eval`
