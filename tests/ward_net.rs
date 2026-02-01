@@ -96,7 +96,10 @@ print(json.encode({{
   status = res.status,
   ok = res:is_ok(),
   body = res.body,
+  get_body = res:get_body(),
+  get_status = res:get_status(),
   test_header = res.headers["x-test"],
+  get_test_header = res:get_headers()["x-test"],
 }}))
 "#,
         url = serde_json::to_string(&url).expect("url literal")
@@ -108,7 +111,10 @@ print(json.encode({{
     assert_eq!(value["status"], Value::from(200));
     assert_eq!(value["ok"], Value::Bool(true));
     assert_eq!(value["body"], Value::from("hello world"));
+    assert_eq!(value["body"], value["get_body"]);
+    assert_eq!(value["status"], value["get_status"]);
     assert_eq!(value["test_header"], Value::from("success"));
+    assert_eq!(value["test_header"], value["get_test_header"]);
 }
 
 #[test]
@@ -135,8 +141,11 @@ local exists = fs.is_file(dest)
 print(json.encode({{
   ok = res.ok,
   status = res.status,
+  get_status = res:get_status(),
   path = res.path,
+  get_path = res:get_path(),
   size = res.size,
+  get_size = res:get_size(),
   file_exists = exists,
 }}))
 "#,
@@ -149,8 +158,11 @@ print(json.encode({{
 
     assert_eq!(value["ok"], Value::Bool(false));
     assert_eq!(value["status"], Value::from(413));
+    assert_eq!(value["get_status"], Value::from(413));
     assert!(value["path"].is_null());
+    assert!(value["get_path"].is_null());
     assert_eq!(value["size"], Value::from(0));
+    assert_eq!(value["get_size"], Value::from(0));
     assert_eq!(value["file_exists"], Value::Bool(false));
     assert!(!dest_path.exists(), "fetch target should be removed");
 }

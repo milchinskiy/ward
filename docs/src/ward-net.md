@@ -69,9 +69,9 @@ Fields (also available via methods):
 Methods:
 
 - `resp:is_ok() -> boolean` - true for 2xx.
-- `resp:status() -> integer`
-- `resp:headers() -> table`
-- `resp:body() -> string|nil`
+- `resp:get_status() -> integer`
+- `resp:get_headers() -> table`
+- `resp:get_body() -> string|nil`
 
 Examples:
 
@@ -128,10 +128,10 @@ Options (`opts` table):
 `FetchResponse` userdata fields/methods:
 
 - `resp.ok` / `resp:is_ok() -> boolean`
-- `resp.status` / `resp:status() -> integer` - HTTP status code (or `413`
+- `resp.status` / `resp:get_status() -> integer` - HTTP status code (or `413`
 if `max_bytes` exceeded).
-- `resp.path` / `resp:path() -> string|nil` - destination path.
-- `resp.size` / `resp:size() -> integer` - bytes written.
+- `resp.path` / `resp:get_path() -> string|nil` - destination path.
+- `resp.size` / `resp:get_size() -> integer` - bytes written.
 
 Example:
 

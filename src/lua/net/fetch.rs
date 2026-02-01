@@ -49,9 +49,9 @@ pub struct FetchResponse {
 impl UserData for FetchResponse {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("is_ok", |_, this, ()| Ok(this.ok));
-        methods.add_method("status", |_, this, ()| Ok(this.status));
-        methods.add_method("path", |_, this, ()| Ok(this.path.clone()));
-        methods.add_method("size", |_, this, ()| Ok(this.size));
+        methods.add_method("get_status", |_, this, ()| Ok(this.status));
+        methods.add_method("get_path", |_, this, ()| Ok(this.path.clone()));
+        methods.add_method("get_size", |_, this, ()| Ok(this.size));
     }
 
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {

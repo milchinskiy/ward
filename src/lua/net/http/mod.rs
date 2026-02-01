@@ -133,9 +133,9 @@ pub struct HttpResponse {
 impl UserData for HttpResponse {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("is_ok", |_, this, ()| Ok((200..=299).contains(&this.status)));
-        methods.add_method("status", |_, this, ()| Ok(this.status));
-        methods.add_method("headers", |lua, this, ()| headers_table(lua, &this.headers));
-        methods.add_method("body", |_, this, ()| Ok(this.body.clone()));
+        methods.add_method("get_status", |_, this, ()| Ok(this.status));
+        methods.add_method("get_headers", |lua, this, ()| headers_table(lua, &this.headers));
+        methods.add_method("get_body", |_, this, ()| Ok(this.body.clone()));
     }
 
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
