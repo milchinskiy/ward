@@ -8,6 +8,11 @@ include breaking changes.
 
 ---
 
+## v0.2.3
+
+- fix `ward.net.*` response user data method names
+- update docs
+
 ## v0.2.2
 
 - add `ward.process` -> `Cmd:disown()` / `Pipeline:disown()`
